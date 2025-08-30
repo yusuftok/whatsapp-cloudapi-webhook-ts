@@ -655,20 +655,20 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                         logger.info({ from }, "📍 Location correction via reply");
                         // Normal location handler'a düşecek
                       } else if (msg.type === "text") {
-                        // Text reply to location step - return to awaiting_location
-                        s.step = "awaiting_location";
+                        // Text reply to location step - return to original state
+                        s.step = originalState;
                         sessions.set(from, s);
-                        logger.info({ from }, "📍 Text reply to location step - returning to state");
+                        logger.info({ from, originalState }, "📍 Text reply to location step - returning to original state");
                         // Let it fall through to normal fallback handler
                       }
                       break;
                       
                     case "awaiting_purpose":
                       if (msg.type === "text") {
-                        // Text reply to purpose step - return to awaiting_purpose
-                        s.step = "awaiting_purpose";
+                        // Text reply to purpose step - return to original state
+                        s.step = originalState;
                         sessions.set(from, s);
-                        logger.info({ from }, "🎯 Text reply to purpose step - returning to state");
+                        logger.info({ from, originalState }, "🎯 Text reply to purpose step - returning to original state");
                         // Let it fall through to normal fallback handler
                       } else if (msg.type === "interactive") {
                         // Liste seçimi via reply - normal handler'a düşsün
@@ -678,10 +678,10 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                       
                     case "awaiting_task":
                       if (msg.type === "text") {
-                        // Text reply to task step - return to awaiting_task
-                        s.step = "awaiting_task";
+                        // Text reply to task step - return to original state
+                        s.step = originalState;
                         sessions.set(from, s);
-                        logger.info({ from }, "📋 Text reply to task step - returning to state");
+                        logger.info({ from, originalState }, "📋 Text reply to task step - returning to original state");
                         // Let it fall through to normal fallback handler
                       } else if (msg.type === "interactive") {
                         // İş seçimi via reply - normal handler'a düşsün
@@ -690,10 +690,10 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                       break;
                       
                     case "awaiting_note_decision":
-                      // Karar değişikliği - return to state
-                      s.step = "awaiting_note_decision";
+                      // Karar değişikliği - return to original state
+                      s.step = originalState;
                       sessions.set(from, s);
-                      logger.info({ from }, "❓ Text reply to note decision step - returning to state");
+                      logger.info({ from, originalState }, "❓ Text reply to note decision step - returning to original state");
                       // Let it fall through to normal fallback handler
                       
                     case "awaiting_extra":
