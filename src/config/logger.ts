@@ -1,11 +1,13 @@
 import pino from 'pino';
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
 
 export const logger = pino({
   level: LOG_LEVEL,
-  transport:
-    process.env.NODE_ENV === "development"
+  transport: isProduction 
+    ? undefined // Use default JSON logging in production/Vercel
+    : process.env.NODE_ENV === "development"
       ? { 
           targets: [
             { 

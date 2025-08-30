@@ -1,12 +1,28 @@
 {
+    "name": "whatsapp-cloudapi-webhook-ts",
+    "version": "1.0.0",
+    "description": "WhatsApp Cloud API webhook server with FSM-based conversation flow",
+    "main": "dist/server.js",
     "scripts": {
         "dev": "NODE_ENV=development LOG_LEVEL=debug tsx watch src/server.ts",
         "build": "tsc",
-        "start": "node dist/server.js"
+        "start": "node dist/server.js",
+        "vercel-build": "npm run build"
+    },
+    "dependencies": {
+        "axios": "^1.11.0",
+        "dotenv": "^16.6.1",
+        "express": "^4.21.2",
+        "pino": "^8.21.0",
+        "pino-pretty": "^13.1.1"
     },
     "devDependencies": {
+        "@types/express": "^4.17.23",
         "@types/node": "^24.3.0",
         "tsx": "^4.20.5",
         "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18.0.0"
     }
 }
