@@ -632,9 +632,12 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             // --- FSM ---
             // REPLY HANDLER - Check for replies to active flow messages
             const replyContext = (msg as any).context;
+            logger.debug({ from, replyContext, hasContext: !!replyContext }, `🔄 Reply detection: user(${from}) | Context: ${JSON.stringify(replyContext)}`);
+            
             if (replyContext?.id && !replyContext.forwarded) {
               const replyToId = replyContext.id;
               const isActiveFlowReply = s.messageIds.has(replyToId);
+              logger.debug({ from, replyToId, isActiveFlowReply, messageIds: Array.from(s.messageIds) }, `🔄 Reply check: replyToId(${replyToId}) in messageIds: ${isActiveFlowReply}`);
               
               // If flow is completed, treat all replies as old flow
               if (isActiveFlowReply && s.step !== "completed") {
@@ -643,7 +646,8 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   from, 
                   replyToId, 
                   originalState, 
-                  currentState: s.step 
+                  currentState: s.step,
+                  stateMap: Array.from(s.stateMessageMap.entries())
                 }, `🔄 Reply detected to active flow message`);
                 
                 // State-specific reply handling
@@ -666,9 +670,10 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                     case "awaiting_purpose":
                       if (msg.type === "text") {
                         // Text reply to purpose step - return to original state
+                        const oldStep = s.step;
                         s.step = originalState;
                         sessions.set(from, s);
-                        logger.info({ from, originalState }, "🎯 Text reply to purpose step - returning to original state");
+                        logger.info({ from, originalState, oldStep, newStep: s.step }, "🎯 Text reply to purpose step - STATE CHANGED");
                         // Let it fall through to normal fallback handler
                       } else if (msg.type === "interactive") {
                         // Liste seçimi via reply - normal handler'a düşsün
@@ -875,6 +880,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             // Image/video handling moved to global handler at the top of FSM
 
             // Diğer mesajları (serbest metin vs.) ack'leyip akış durumuna göre yönlendir
+            logger.debug({ from, step: s.step, msgType: msg.type }, `🔄 Fallback handler: user(${from}) | step: ${s.step} | msgType: ${msg.type}`);
             switch (s.step) {
               case "idle":
                 await sendText(from, 
