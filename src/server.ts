@@ -773,8 +773,11 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             if (s.step === "awaiting_purpose" && msg.type === "interactive" && (msg as any).interactive?.list_reply) {
               // 3) Amaç seçildi → iş listesi
               const id = String((msg as any).interactive.list_reply.id || "");
+              logger.debug({ from, listReplyId: id, currentPurpose: s.purpose }, `🎯 Purpose selection attempt: user(${from}) | ID: ${id}`);
               if (id.startsWith("purpose:")) {
-                s.purpose = id.slice("purpose:".length) as PurposeId;
+                const newPurpose = id.slice("purpose:".length) as PurposeId;
+                logger.debug({ from, oldPurpose: s.purpose, newPurpose }, `🎯 Purpose change: ${s.purpose} → ${newPurpose}`);
+                s.purpose = newPurpose;
                 s.step = "awaiting_task";
                 sessions.set(from, s);
                 
