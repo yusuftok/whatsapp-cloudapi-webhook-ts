@@ -605,6 +605,20 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
 
             const msg = normalizeMessage(raw);
             const from = msg.from;
+            
+            // Debug interactive messages with context
+            if (msg.type === 'interactive') {
+              logger.debug({ 
+                from,
+                hasContext: !!(msg as any).context,
+                context: (msg as any).context,
+                rawInteractive: (raw as any).interactive,
+                normalizedInteractive: (msg as any).interactive,
+                listReply: (msg as any).interactive?.list_reply,
+                rawListReply: (raw as any).interactive?.list_reply
+              }, `🔍 Interactive message structure debugging`);
+            }
+            
             const contentPreview = msg.type === 'text' ? (msg as any).text : 
                                    msg.type === 'location' ? `lat:${(msg as any).location?.latitude}, lng:${(msg as any).location?.longitude}` :
                                    msg.type === 'interactive' ? (msg as any).interactive?.type :
@@ -775,6 +789,19 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               continue;
             }
 
+            // Debug interactive handler conditions
+            if (msg.type === "interactive") {
+              logger.debug({ 
+                from,
+                step: s.step,
+                stepMatch: s.step === "awaiting_purpose",
+                typeMatch: msg.type === "interactive",
+                hasListReply: !!(msg as any).interactive?.list_reply,
+                listReplyContent: (msg as any).interactive?.list_reply,
+                allConditionsMet: s.step === "awaiting_purpose" && msg.type === "interactive" && !!(msg as any).interactive?.list_reply
+              }, `🔍 Interactive handler condition check`);
+            }
+            
             if (s.step === "awaiting_purpose" && msg.type === "interactive" && (msg as any).interactive?.list_reply) {
               // 3) Amaç seçildi → iş listesi
               const id = String((msg as any).interactive.list_reply.id || "");
