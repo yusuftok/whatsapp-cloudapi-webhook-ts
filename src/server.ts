@@ -636,7 +636,8 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               const replyToId = replyContext.id;
               const isActiveFlowReply = s.messageIds.has(replyToId);
               
-              if (isActiveFlowReply) {
+              // If flow is completed, treat all replies as old flow
+              if (isActiveFlowReply && s.step !== "completed") {
                 const originalState = s.stateMessageMap.get(replyToId);
                 logger.debug({ 
                   from, 
@@ -952,10 +953,13 @@ async function finalizeAndUpdateJob(s: Session, metadata?: AnyObject) {
   };
 
   await forwardWithRetry(payload);
-  await sendText(
-    s.user,
-    "Teşekkürler, bildiriminiz alındı ve iş üzerine kaydedildi."
-  );
+  
+  // Different completion messages for independent vs job-specific tasks
+  const completionMessage = s.selectedTaskId === "independent" 
+    ? "Teşekkürler, bildiriminiz alındı ve kaydedildi."
+    : "Teşekkürler, bildiriminiz alındı ve iş üzerine kaydedildi.";
+    
+  await sendText(s.user, completionMessage);
 }
 
 /** ---- (Opsiyonel) Debug outbound ---- */
