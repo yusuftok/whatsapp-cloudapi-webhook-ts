@@ -178,6 +178,17 @@ async function graphSend(payload: AnyObject) {
       responseStatus: 'success'
     }, `✅ ${payload.type} message delivered successfully: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | msgId: ${messageId}`);
     
+    // Track outgoing message ID in session
+    if (messageId && payload.to) {
+      const phoneNumber = payload.to as string;
+      const s = sessions.get(phoneNumber);
+      if (s) {
+        s.messageIds.add(messageId);
+        s.stateMessageMap.set(messageId, s.step);
+        sessions.set(phoneNumber, s);
+      }
+    }
+    
     return data;
   } catch (error: any) {
     logger.error({ 
@@ -318,6 +329,21 @@ function fetchAssignedJobsFor(phone: string, _purpose: PurposeId) {
 
 async function askJobList(to: string, phone: string, purpose: PurposeId) {
   const jobs = fetchAssignedJobsFor(phone, purpose);
+  
+  // Handle empty job list
+  if (jobs.length === 0) {
+    const rows: ListRow[] = [
+      { id: "job:independent", title: "Bağımsız bildirim", description: "Atanmış iş bulunmuyor - serbest bildirim yap" },
+    ];
+    return sendInteractiveList(
+      to,
+      "İş bulunamadı",
+      "Size atanmış iş bulunmuyor. Bağımsız bildirim yapabilirsiniz.",
+      "Devam",
+      [{ rows }]
+    );
+  }
+  
   const rows: ListRow[] = [
     ...jobs.map((j) => ({ id: `job:${j.id}`, title: j.title, description: j.description })),
     { id: "job:independent", title: "Bunlardan bağımsız", description: "Serbest bildirim" },
@@ -332,9 +358,9 @@ async function askJobList(to: string, phone: string, purpose: PurposeId) {
 }
 
 async function askNoteDecision(to: string) {
-  return sendInteractiveButtons(to, "Ek açıklama veya ses kaydı eklemek ister misiniz?", [
-    { id: "note:add", title: "Ekle" },
-    { id: "note:skip", title: "Atla" },
+  return sendInteractiveButtons(to, "Bu iş için ek bilgi var mı?", [
+    { id: "note:add", title: "Var" },
+    { id: "note:skip", title: "Yok" },
   ]);
 }
 
@@ -593,18 +619,125 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               timestamp: new Date(msg.timestamp).toISOString()
             }, `💬 Received ${msg.type} message: user(${from}) → bot(${WHATSAPP_PHONE_NUMBER_ID}) | Content: "${contentPreview}" | MsgId: ${mid}`);
             
-            const s = sessions.get(from) || sessions.new(from);
+            let s = sessions.get(from) || sessions.new(from);
             logger.debug({ from, step: s.step, sessionExists: sessions.get(from) ? true : false }, `👤 Session for user(${from}): step="${s.step}" | ${sessions.get(from) ? 'existing' : 'new'} session`);
+            
+            // Track incoming message ID
+            if (msg.wa_message_id) {
+              s.messageIds.add(msg.wa_message_id);
+              s.stateMessageMap.set(msg.wa_message_id, s.step);
+              s.updatedAt = Date.now();
+            }
 
             // --- FSM ---
-            if ((msg.type === "image" || msg.type === "video") && s.step === "idle") {
-              // 1) Media geldi → akışı başlat
+            // REPLY HANDLER - Check for replies to active flow messages
+            const replyContext = (msg as any).context;
+            if (replyContext?.id && !replyContext.forwarded) {
+              const replyToId = replyContext.id;
+              const isActiveFlowReply = s.messageIds.has(replyToId);
+              
+              if (isActiveFlowReply) {
+                const originalState = s.stateMessageMap.get(replyToId);
+                logger.debug({ 
+                  from, 
+                  replyToId, 
+                  originalState, 
+                  currentState: s.step 
+                }, `🔄 Reply detected to active flow message`);
+                
+                // State-specific reply handling
+                if (originalState) {
+                  switch (originalState) {
+                    case "awaiting_location":
+                      if (msg.type === "location") {
+                        // Konum düzeltmesi - normal flow'a devam
+                        logger.info({ from }, "📍 Location correction via reply");
+                        // Normal location handler'a düşecek
+                      } else if (msg.type === "text") {
+                        await sendText(from, 
+                          "📍 Konum hakkındaki mesajınızı aldım.\n" +
+                          "Lütfen konumunuzu 📎 menüden paylaşın."
+                        );
+                        continue;
+                      }
+                      break;
+                      
+                    case "awaiting_purpose":
+                      if (msg.type === "text") {
+                        await sendText(from, 
+                          "🎯 Amaç seçimi hakkındaki mesajınızı aldım.\n" +
+                          "Lütfen yukarıdaki listeden bir amaç seçin."
+                        );
+                        continue;
+                      }
+                      break;
+                      
+                    case "awaiting_task":
+                      // İş değişikliği - state'e geri dön
+                      if (msg.type === "text") {
+                        s.step = "awaiting_task";
+                        sessions.set(from, s);
+                        await sendText(from, 
+                          "📋 İş seçimini değiştirmek istediğinizi anladım.\n" +
+                          "Yukarıdaki listeden yeni bir iş seçebilirsiniz."
+                        );
+                        continue;
+                      }
+                      break;
+                      
+                    case "awaiting_note_decision":
+                      // Karar değişikliği
+                      s.step = "awaiting_note_decision";
+                      sessions.set(from, s);
+                      await sendText(from, 
+                        "❓ Kararınızı değiştirmek için yukarıdaki butonları kullanabilirsiniz."
+                      );
+                      continue;
+                      
+                    case "awaiting_extra":
+                      // Bilgi düzeltmesi - devam et ve override yap
+                      if (msg.type === "text" || msg.type === "audio") {
+                        logger.info({ from }, "💬 Extra info correction via reply");
+                        // Normal handler'a düşecek ve override edecek
+                      }
+                      break;
+                  }
+                }
+              } else {
+                // Eski flow'a reply
+                await sendText(from, 
+                  "⚠️ Önceki bir işleme yanıt verdiniz.\n\n" +
+                  "🔄 Yeni işlem için *görsel/video* gönderin.\n" +
+                  "➡️ Mevcut işleme devam etmek için normal mesaj gönderin."
+                );
+                continue;
+              }
+            }
+
+            // GLOBAL IMAGE/VIDEO HANDLER - Resets FSM from any state
+            if (msg.type === "image" || msg.type === "video") {
               const mediaId = (msg as any).media?.id;
-              logger.debug({ from, mediaType: msg.type, mediaId, currentStep: s.step }, `🎬 Media flow started: user(${from}) sent ${msg.type} (id:${mediaId}) | FSM: ${s.step} → awaiting_location`);
+              const previousStep = s.step;
+              
+              // Reset session completely and start fresh
+              s = sessions.new(from);
               s.media.push({ kind: msg.type, id: mediaId || "", caption: (msg as any).media?.caption });
               s.step = "awaiting_location";
               sessions.set(from, s);
-              logger.debug({ from, newStep: s.step }, `📍 Location request sent: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${from}) | FSM: idle → ${s.step}`);
+              
+              logger.debug({ 
+                from, 
+                mediaType: msg.type, 
+                mediaId, 
+                previousStep, 
+                newStep: s.step 
+              }, `🎬 Media received - FSM reset: user(${from}) sent ${msg.type} (id:${mediaId}) | FSM: ${previousStep} → ${s.step}`);
+              
+              // Kullanıcıyı uygun olmayan state'ten reset edildiyse bilgilendir
+              if (previousStep !== "idle" && previousStep !== "awaiting_location") {
+                await sendText(from, "Yeni görsel alındı, akış baştan başlatılıyor.");
+              }
+              
               await requestLocation(from);
               continue;
             }
@@ -621,8 +754,17 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               };
               s.step = "awaiting_purpose";
               sessions.set(from, s);
-              logger.debug({ from, newStep: s.step }, `🎯 Purpose list sent: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${from}) | FSM: awaiting_location → ${s.step}`);
-              await askPurposeList(from);
+              logger.debug({ from, newStep: s.step }, `🎯 Attempting to send purpose list: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${from}) | FSM: awaiting_location → ${s.step}`);
+              
+              try {
+                await askPurposeList(from);
+                logger.debug({ from }, `✅ Purpose list sent successfully`);
+              } catch (error: any) {
+                logger.error({ error: error.message, from }, "❌ Failed to send purpose list");
+                await sendText(from, "Amaç listesi yüklenirken hata oluştu. Lütfen konum paylaşımını tekrar yapın.");
+                s.step = "awaiting_location"; // Revert to previous step
+                sessions.set(from, s);
+              }
               continue;
             }
 
@@ -633,19 +775,37 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 s.purpose = id.slice("purpose:".length) as PurposeId;
                 s.step = "awaiting_task";
                 sessions.set(from, s);
-                await askJobList(from, from, s.purpose);
+                
+                try {
+                  await askJobList(from, from, s.purpose);
+                  logger.debug({ from, purpose: s.purpose }, `✅ Job list sent successfully`);
+                } catch (error: any) {
+                  logger.error({ error: error.message, from, purpose: s.purpose }, "❌ Failed to send job list");
+                  await sendText(from, "İş listesi yüklenirken hata oluştu. Lütfen amaç seçimini tekrar yapın.");
+                  s.step = "awaiting_purpose"; // Revert to previous step
+                  sessions.set(from, s);
+                }
               }
               continue;
             }
 
             if (s.step === "awaiting_task" && msg.type === "interactive" && (msg as any).interactive?.list_reply) {
-              // 4) İş seçildi → not kararı
+              // 4) İş seçildi → not kararı veya direkt bilgi alma
               const id = String((msg as any).interactive.list_reply.id || "");
               if (id.startsWith("job:")) {
                 s.selectedTaskId = id.slice("job:".length);
-                s.step = "awaiting_note_decision";
-                sessions.set(from, s);
-                await askNoteDecision(from);
+                
+                if (s.selectedTaskId === "independent") {
+                  // Bağımsız bildirim için direkt açıklama iste
+                  s.step = "awaiting_extra";
+                  sessions.set(from, s);
+                  await sendText(from, "Lütfen durumu açıklayın:");
+                } else {
+                  // Normal işler için not ekleme sorusu
+                  s.step = "awaiting_note_decision";
+                  sessions.set(from, s);
+                  await askNoteDecision(from);
+                }
               }
               continue;
             }
@@ -661,7 +821,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               if (id === "note:add") {
                 s.step = "awaiting_extra";
                 sessions.set(from, s);
-                await sendText(from, "Lütfen ek açıklamayı yazın veya bir ses kaydı gönderin.");
+                await sendText(from, "Lütfen ek bilgiyi paylaşın:");
               }
               continue;
             }
@@ -682,32 +842,68 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 continue;
               }
               // Başka şey geldiyse görmezden gel ve kullanıcıyı yönlendir:
-              await sendText(from, "Ek açıklamayı metin olarak yazabilir veya ses kaydı gönderebilirsiniz.");
+              await sendText(from, 
+                "💬 Lütfen *bilgi paylaşın*:\n" +
+                "• Yazılı açıklama yazın\n" +
+                "• Sesli mesaj gönderin\n\n" +
+                "🔄 Yeniden başlamak için *görsel/video* gönderin."
+              );
               continue;
             }
 
-            // Kullanıcı akış dışı ek görsel/video gönderdiyse: yeni medya'yı da ekle, lokasyonu istemeye devam et
-            if ((msg.type === "image" || msg.type === "video") && (s.step === "awaiting_location" || s.step === "idle")) {
-              const mediaId = (msg as any).media?.id;
-              s.media.push({ kind: msg.type, id: mediaId || "", caption: (msg as any).media?.caption });
-              sessions.set(from, s);
-              if (s.step === "idle") {
-                s.step = "awaiting_location";
-                sessions.set(from, s);
-                await requestLocation(from);
+            // Handle retry commands for job list
+            if (s.step === "awaiting_task" && msg.type === "text") {
+              const text = (msg as any).text?.toLowerCase().trim();
+              if (text === "liste" || text === "list") {
+                // Retry sending job list
+                try {
+                  await askJobList(from, from, s.purpose!);
+                  logger.debug({ from }, `📋 Job list resent on user request`);
+                } catch (error: any) {
+                  logger.error({ error: error.message, from }, "❌ Failed to resend job list");
+                  await sendText(from, "Liste tekrar gönderilemedi. Lütfen baştan başlayın.");
+                }
+                continue;
               }
-              continue;
             }
+
+            // Image/video handling moved to global handler at the top of FSM
 
             // Diğer mesajları (serbest metin vs.) ack'leyip akış durumuna göre yönlendir
-            if (s.step === "awaiting_location") {
-              await sendText(from, "Lütfen 📎 menüsünden *Konum* paylaşın, sonra devam edeceğiz.");
-            } else if (s.step === "awaiting_purpose") {
-              await sendText(from, "Lütfen bir amaç seçin (gönderdiğim listeden).");
-            } else if (s.step === "awaiting_task") {
-              await sendText(from, "Lütfen bir iş seçin (listeden).");
-            } else if (s.step === "awaiting_note_decision") {
-              await sendText(from, "Not eklemek ister misiniz? *Ekle* veya *Atla* butonuna dokunun.");
+            switch (s.step) {
+              case "awaiting_location":
+                await sendText(from, 
+                  "📍 Lütfen *konum* paylaşın:\n" +
+                  "📎 menüsünden → Konum → Gönder\n\n" +
+                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
+                );
+                break;
+              
+              case "awaiting_purpose":
+                await sendText(from, 
+                  "🎯 Lütfen *listeden bir amaç* seçin:\n" +
+                  "Yukarıdaki listede bulunan seçeneklere dokunun.\n\n" +
+                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
+                );
+                break;
+              
+              case "awaiting_task":
+                await sendText(from, 
+                  "📋 Lütfen *listeden bir iş* seçin:\n" +
+                  "• Liste gelmemişse: 'liste' yazın\n" +
+                  "• Yukarıdaki seçeneklere dokunun\n\n" +
+                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
+                );
+                break;
+              
+              case "awaiting_note_decision":
+                await sendText(from, 
+                  "❓ Lütfen *butona* dokunun:\n" +
+                  "Yukarıdaki Var/Yok butonlarından birini seçin.\n\n" +
+                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
+                );
+                break;
+              
             }
           } // messages
         } // changes

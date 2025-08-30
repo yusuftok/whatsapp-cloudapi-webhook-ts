@@ -25,6 +25,12 @@ export interface WhatsAppMessageBase {
   from: string;
   timestamp?: string;
   type: string;
+  context?: {                    // Reply context
+    from?: string;
+    id?: string;                 // Reply yapılan mesajın ID'si
+    forwarded?: boolean;
+    frequently_forwarded?: boolean;
+  };
 }
 
 export interface WhatsAppTextMessage extends WhatsAppMessageBase {

@@ -25,6 +25,11 @@ export interface Session {
   extraAudio?: { id: string; mime_type?: string };
   createdAt: number;
   updatedAt: number;
+  
+  // Reply tracking fields
+  flowId: string;                                    // Unique flow identifier
+  messageIds: Set<string>;                           // Bu flow'daki tüm mesaj ID'leri
+  stateMessageMap: Map<string, Step>;                // MessageId -> State mapping
 }
 
 class SessionStore {
@@ -43,6 +48,22 @@ class SessionStore {
 
   set(phone: string, s: Session) {
     s.updatedAt = Date.now();
+    
+    // Message ID cleanup (max 50 mesaj sakla)
+    if (s.messageIds.size > 50) {
+      const idsArray = Array.from(s.messageIds);
+      const toKeep = idsArray.slice(-30); // Son 30'u koru
+      s.messageIds = new Set(toKeep);
+      
+      // StateMap'i de temizle
+      const validIds = new Set(toKeep);
+      for (const [id, _] of s.stateMessageMap) {
+        if (!validIds.has(id)) {
+          s.stateMessageMap.delete(id);
+        }
+      }
+    }
+    
     this.map.set(phone, s);
   }
 
@@ -61,6 +82,9 @@ class SessionStore {
       media: [],
       createdAt: now,
       updatedAt: now,
+      flowId: `flow_${now}_${phone}`,
+      messageIds: new Set(),
+      stateMessageMap: new Map(),
     };
     this.map.set(phone, s);
     return s;
