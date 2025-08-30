@@ -876,7 +876,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 await sendText(from, 
                   "👋 Merhaba!\n\n" +
                   "📸 İşlem başlatmak için *görsel/video* gönderin.\n" +
-                  "📋 Size bildirmek istediğiniz bir durum varsa görseli paylaşın."
+                  "📋 Bize bildirmek istediğiniz bir durum varsa görseli paylaşın."
                 );
                 break;
               
