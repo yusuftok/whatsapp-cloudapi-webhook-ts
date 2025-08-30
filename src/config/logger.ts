@@ -12,7 +12,10 @@ export const logger = pino({
               target: "pino-pretty", 
               options: { 
                 colorize: true,
-                translateTime: 'SYS:yyyy-mm-dd HH:MM:ss'
+                translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
+                levelFirst: true,
+                customLevels: 'info:30,debug:20,warn:40,error:50,fatal:60',
+                customColors: 'info:blue,debug:green,warn:yellow,error:red,fatal:red'
               } 
             },
             { 
@@ -20,7 +23,9 @@ export const logger = pino({
               options: { 
                 destination: "./debug.log",
                 colorize: false,
-                translateTime: 'SYS:yyyy-mm-dd HH:MM:ss'
+                translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
+                levelFirst: true,
+                customLevels: 'info:30,debug:20,warn:40,error:50,fatal:60'
               } 
             }
           ]
