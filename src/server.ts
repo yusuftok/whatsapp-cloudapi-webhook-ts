@@ -670,6 +670,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                           "Lütfen yukarıdaki listeden bir amaç seçin."
                         );
                         continue;
+                      } else if (msg.type === "interactive") {
+                        // Liste seçimi via reply - normal handler'a düşsün
+                        logger.info({ from }, "🎯 Purpose selection via reply");
                       }
                       break;
                       
@@ -683,6 +686,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                           "Yukarıdaki listeden yeni bir iş seçebilirsiniz."
                         );
                         continue;
+                      } else if (msg.type === "interactive") {
+                        // İş seçimi via reply - normal handler'a düşsün
+                        logger.info({ from }, "📋 Task selection via reply");
                       }
                       break;
                       
