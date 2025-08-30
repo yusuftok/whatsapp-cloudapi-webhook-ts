@@ -7,7 +7,9 @@
       "Bash(git push:*)",
       "WebSearch",
       "mcp__vercel__createEnvVar",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "mcp__vercel__listEnvVars",
+      "mcp__vercel__editEnvVar"
     ],
     "deny": [],
     "ask": []

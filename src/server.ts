@@ -40,6 +40,21 @@ logger.info({
 }, "🚀 Server starting with configuration");
 
 // Log token configuration (masked)
+// Validate WhatsApp token format and length
+if (WHATSAPP_ACCESS_TOKEN) {
+  if (WHATSAPP_ACCESS_TOKEN.length < 100) {
+    logger.warn({
+      tokenLength: WHATSAPP_ACCESS_TOKEN.length,
+      tokenPreview: `${WHATSAPP_ACCESS_TOKEN.substring(0, 20)}...`
+    }, "⚠️ WHATSAPP_ACCESS_TOKEN appears to be truncated or invalid (expected >100 chars)");
+  }
+  if (!WHATSAPP_ACCESS_TOKEN.startsWith('EAA')) {
+    logger.warn({
+      tokenStart: WHATSAPP_ACCESS_TOKEN.substring(0, 10)
+    }, "⚠️ WHATSAPP_ACCESS_TOKEN doesn't start with expected 'EAA' prefix");
+  }
+}
+
 logger.info({ 
   hasWhatsAppToken: !!WHATSAPP_ACCESS_TOKEN,
   tokenLength: WHATSAPP_ACCESS_TOKEN?.length,
