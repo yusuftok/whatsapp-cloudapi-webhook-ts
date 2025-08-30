@@ -92,7 +92,7 @@ const graph: AxiosInstance = axios.create({
   headers: WHATSAPP_ACCESS_TOKEN
     ? { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` }
     : undefined,
-  timeout: 15000, // Increased to match forward timeout
+  timeout: 30000, // Increased for slower WhatsApp API responses
 });
 
 // Request interceptor - log request details
@@ -537,7 +537,7 @@ app.get("/whatsapp/webhook", (req, res) => {
 const seen = new TTLCache();
 
 /** ---- Webhook (POST) ---- */
-app.post("/whatsapp/webhook", (req: Request & { rawBody?: Buffer }, res: Response) => {
+app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: Response) => {
   logger.debug({ headers: req.headers, bodySize: req.rawBody?.length }, `🔄 Webhook POST received: ${req.rawBody?.length || 0} bytes | Headers: ${Object.keys(req.headers).join(', ')}`);
   
   if (!verifySignature(req)) {
@@ -545,11 +545,9 @@ app.post("/whatsapp/webhook", (req: Request & { rawBody?: Buffer }, res: Respons
     return res.sendStatus(401);
   }
   
-  logger.debug(`✅ Webhook signature verified, sending 200 OK response to WhatsApp`);
-  res.sendStatus(200);
+  logger.debug(`✅ Webhook signature verified, processing webhook data`);
 
-  setImmediate(async () => {
-    try {
+  try {
       const body = req.body as WhatsAppWebhookBody;
       const entries = body?.entry ?? [];
       logger.debug({ entriesCount: entries.length }, `📦 Processing webhook: ${entries.length} entry(ies) from WhatsApp`);
@@ -714,15 +712,18 @@ app.post("/whatsapp/webhook", (req: Request & { rawBody?: Buffer }, res: Respons
           } // messages
         } // changes
       } // entries
-    } catch (err: any) {
-      logger.error({ 
-        error: err?.message, 
-        stack: err?.stack,
-        requestBody: req.body,
-        headers: req.headers
-      }, `💥 Critical webhook processing error: ${err?.message} | Request body size: ${JSON.stringify(req.body).length} chars`);
-    }
-  });
+  } catch (err: any) {
+    logger.error({ 
+      error: err?.message, 
+      stack: err?.stack,
+      requestBody: req.body,
+      headers: req.headers
+    }, `💥 Critical webhook processing error: ${err?.message} | Request body size: ${JSON.stringify(req.body).length} chars`);
+  }
+  
+  // Send response after all processing is complete
+  logger.debug(`✅ Webhook processing complete, sending 200 OK to WhatsApp`);
+  res.sendStatus(200);
 });
 
 /** ---- İş güncelle (mock) + forward ---- */
