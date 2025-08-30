@@ -655,21 +655,21 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                         logger.info({ from }, "📍 Location correction via reply");
                         // Normal location handler'a düşecek
                       } else if (msg.type === "text") {
-                        await sendText(from, 
-                          "📍 Konum hakkındaki mesajınızı aldım.\n" +
-                          "Lütfen konumunuzu 📎 menüden paylaşın."
-                        );
-                        continue;
+                        // Text reply to location step - return to awaiting_location
+                        s.step = "awaiting_location";
+                        sessions.set(from, s);
+                        logger.info({ from }, "📍 Text reply to location step - returning to state");
+                        // Let it fall through to normal fallback handler
                       }
                       break;
                       
                     case "awaiting_purpose":
                       if (msg.type === "text") {
-                        await sendText(from, 
-                          "🎯 Amaç seçimi hakkındaki mesajınızı aldım.\n" +
-                          "Lütfen yukarıdaki listeden bir amaç seçin."
-                        );
-                        continue;
+                        // Text reply to purpose step - return to awaiting_purpose
+                        s.step = "awaiting_purpose";
+                        sessions.set(from, s);
+                        logger.info({ from }, "🎯 Text reply to purpose step - returning to state");
+                        // Let it fall through to normal fallback handler
                       } else if (msg.type === "interactive") {
                         // Liste seçimi via reply - normal handler'a düşsün
                         logger.info({ from }, "🎯 Purpose selection via reply");
@@ -677,15 +677,12 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                       break;
                       
                     case "awaiting_task":
-                      // İş değişikliği - state'e geri dön
                       if (msg.type === "text") {
+                        // Text reply to task step - return to awaiting_task
                         s.step = "awaiting_task";
                         sessions.set(from, s);
-                        await sendText(from, 
-                          "📋 İş seçimini değiştirmek istediğinizi anladım.\n" +
-                          "Yukarıdaki listeden yeni bir iş seçebilirsiniz."
-                        );
-                        continue;
+                        logger.info({ from }, "📋 Text reply to task step - returning to state");
+                        // Let it fall through to normal fallback handler
                       } else if (msg.type === "interactive") {
                         // İş seçimi via reply - normal handler'a düşsün
                         logger.info({ from }, "📋 Task selection via reply");
@@ -693,13 +690,11 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                       break;
                       
                     case "awaiting_note_decision":
-                      // Karar değişikliği
+                      // Karar değişikliği - return to state
                       s.step = "awaiting_note_decision";
                       sessions.set(from, s);
-                      await sendText(from, 
-                        "❓ Kararınızı değiştirmek için yukarıdaki butonları kullanabilirsiniz."
-                      );
-                      continue;
+                      logger.info({ from }, "❓ Text reply to note decision step - returning to state");
+                      // Let it fall through to normal fallback handler
                       
                     case "awaiting_extra":
                       // Bilgi düzeltmesi - devam et ve override yap
