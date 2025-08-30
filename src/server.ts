@@ -872,6 +872,14 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
 
             // Diğer mesajları (serbest metin vs.) ack'leyip akış durumuna göre yönlendir
             switch (s.step) {
+              case "idle":
+                await sendText(from, 
+                  "👋 Merhaba!\n\n" +
+                  "📸 İşlem başlatmak için *görsel/video* gönderin.\n" +
+                  "📋 Size bildirmek istediğiniz bir durum varsa görseli paylaşın."
+                );
+                break;
+              
               case "awaiting_location":
                 await sendText(from, 
                   "📍 Lütfen *konum* paylaşın:\n" +
