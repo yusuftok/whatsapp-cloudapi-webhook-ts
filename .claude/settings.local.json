@@ -9,7 +9,9 @@
       "mcp__vercel__createEnvVar",
       "Bash(curl:*)",
       "mcp__vercel__listEnvVars",
-      "mcp__vercel__editEnvVar"
+      "mcp__vercel__editEnvVar",
+      "mcp__vercel__getDeployments",
+      "Bash(vercel:*)"
     ],
     "deny": [],
     "ask": []

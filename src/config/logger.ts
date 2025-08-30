@@ -13,6 +13,16 @@ const usePrettyLogging = () => {
 
 export const logger = pino({
   level: LOG_LEVEL,
+  // Add human-readable timestamp in Turkish timezone for both JSON and pretty modes
+  timestamp: () => `,"time":"${new Date().toLocaleString('tr-TR', { 
+    timeZone: 'Europe/Istanbul',
+    year: 'numeric',
+    month: '2-digit', 
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })}"`,
   transport: usePrettyLogging() 
     ? { 
         targets: [
@@ -20,7 +30,7 @@ export const logger = pino({
             target: "pino-pretty", 
             options: { 
               colorize: true,
-              translateTime: 'SYS:standard',
+              translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
               levelFirst: true,
               ignore: 'pid,hostname',
               messageFormat: '{msg}',
@@ -33,7 +43,7 @@ export const logger = pino({
             options: { 
               destination: "./debug.log",
               colorize: false,
-              translateTime: 'SYS:standard',
+              translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
               levelFirst: true,
               ignore: 'pid,hostname',
               customLevels: 'info:30,debug:20,warn:40,error:50,fatal:60'
@@ -41,5 +51,5 @@ export const logger = pino({
           }] : [])
         ]
       }
-    : undefined, // Use default JSON logging
+    : undefined, // JSON logging with Turkish timestamp
 });
