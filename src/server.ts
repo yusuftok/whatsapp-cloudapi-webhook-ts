@@ -92,7 +92,7 @@ const graph: AxiosInstance = axios.create({
   headers: WHATSAPP_ACCESS_TOKEN
     ? { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` }
     : undefined,
-  timeout: 10000,
+  timeout: 15000, // Increased to match forward timeout
 });
 
 // Request interceptor - log request details
@@ -252,7 +252,7 @@ async function requestLocation(to: string) {
     // Uygunsa (destekliyorsa) deneyin:
     // NOT: Uygulamada destek yoksa bu çağrı 400 döndürebilir; o yüzden try/fallback yapıyoruz.
     try {
-      return graphSend({
+      return await graphSend({
         messaging_product: "whatsapp",
         to,
         type: "interactive",
@@ -262,12 +262,17 @@ async function requestLocation(to: string) {
           action: { name: "send_location" },
         },
       });
-    } catch (e) {
-      logger.warn("Native location_request_message başarısız; fallback'a geçiliyor.");
+    } catch (e: any) {
+      logger.warn({ 
+        error: e.message, 
+        status: e.response?.status, 
+        statusText: e.response?.statusText,
+        to 
+      }, "❌ Native location_request_message failed; falling back to text message");
     }
   }
   // Fallback: düz metin
-  return sendText(
+  return await sendText(
     to,
     "Lütfen WhatsApp'ta ataç menüsünden (📎) *Konum* seçip mevcut konumunuzu paylaşın."
   );
