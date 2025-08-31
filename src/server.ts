@@ -596,6 +596,16 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           logger.info(logData, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type} | Content: "${contentPreview}"`);
           
           let s = sessions.get(from) || sessions.new(from);
+          
+          logger.debug({
+            event: 'SESSION_STATE_CHECK',
+            phone: from,
+            workflowId: s.workflowId,
+            currentState: s.step,
+            messageId: mid,
+            messageType: msg.type,
+            timestamp: new Date().toISOString()
+          }, `🔍 SESSION_STATE_CHECK: Phone: ${from} | State: ${s.step} | Workflow: ${s.workflowId} | MessageType: ${msg.type}`);
 
           // --- SIMPLIFIED FSM ---
           
@@ -627,6 +637,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             s = sessions.new(from);
             s.workflowId = newWorkflowId;
             s.media.push({type: msg.type as "image" | "video", id: mediaId});
+            
+            // Ensure session is properly saved before transition
+            sessions.set(from, s);
             
             transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
             await requestLocation(from);
