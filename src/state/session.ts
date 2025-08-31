@@ -96,6 +96,19 @@ class SessionStore {
     this.map.set(normalizedPhone, s);
     // Otomatik temizleme da eklenebilir
   }
+
+  delete(phone: string) {
+    const normalizedPhone = normalizePhone(phone);
+    return this.map.delete(normalizedPhone);
+  }
+
+  size(): number {
+    return this.map.size;
+  }
+
+  keys(): string[] {
+    return Array.from(this.map.keys());
+  }
 }
 
 export const sessions = new SessionStore();

@@ -454,7 +454,8 @@ async function cleanupInactiveSessions() {
         timestamp: new Date().toISOString()
       }, `⏱️ WORKFLOW_TIMEOUT: Phone: ${phone} | Workflow: ${session.workflowId} | State: ${session.step} | Idle: ${idleTime}ms`);
       
-      await sendText(phone, "⏱️ Akış zaman aşımına uğradı. Yeni görsel göndererek başlayın.");
+      // Don't send timeout message immediately - just cleanup session
+      // User will get "send image/video" message naturally when they send next message
       sessions['map'].delete(phone);
       
       logger.info({
@@ -572,7 +573,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
         for (const st of value.statuses ?? []) {
           const sid = st.id ?? `${st.recipient_id}:${st.status}:${st.timestamp}`;
           if (seen.has(sid)) continue;
-          logger.debug({ status: st.status, recipientId: st.recipient_id }, `📊 Processing status update`);
+          logger.debug(`📊 Status update: ${st.status}`);
           seen.set(sid);
           await forwardWithRetry({ kind: "status", metadata: value.metadata, status: st } as AnyObject);
         }
@@ -688,7 +689,39 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             s.workflowId = newWorkflowId;
             s.media.push({type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption});
             
+            // DEBUG: Verify session was created and saved
+            const verifyBeforeTransition = sessions.get(from);
+            logger.debug({
+              event: 'SESSION_CREATED_VERIFICATION',
+              phone: from,
+              normalizedPhone: normalizePhone(from),
+              sessionExists: !!verifyBeforeTransition,
+              sessionState: verifyBeforeTransition?.step,
+              sessionWorkflowId: verifyBeforeTransition?.workflowId,
+              expectedWorkflowId: newWorkflowId,
+              allKeys: Array.from((sessions as any).map.keys()),
+              timestamp: new Date().toISOString()
+            }, `📍 SESSION_CREATED_VERIFICATION: Phone: ${from} | Exists: ${!!verifyBeforeTransition} | State: ${verifyBeforeTransition?.step} | Keys: [${Array.from((sessions as any).map.keys()).join(', ')}]`);
+            
+            // Update session with new data
+            sessions.set(from, s);
+            
             transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
+            
+            // DEBUG: Verify session after transition
+            const verifyAfterTransition = sessions.get(from);
+            logger.debug({
+              event: 'SESSION_AFTER_TRANSITION',
+              phone: from,
+              normalizedPhone: normalizePhone(from),
+              sessionExists: !!verifyAfterTransition,
+              sessionState: verifyAfterTransition?.step,
+              sessionWorkflowId: verifyAfterTransition?.workflowId,
+              hasMedia: verifyAfterTransition?.media?.length || 0,
+              allKeys: Array.from((sessions as any).map.keys()),
+              timestamp: new Date().toISOString()
+            }, `✅ SESSION_AFTER_TRANSITION: Phone: ${from} | Exists: ${!!verifyAfterTransition} | State: ${verifyAfterTransition?.step} | Media: ${verifyAfterTransition?.media?.length || 0} | Keys: [${Array.from((sessions as any).map.keys()).join(', ')}]`);
+            
             await requestLocation(from);
             continue;
           }
