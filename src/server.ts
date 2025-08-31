@@ -11,192 +11,127 @@ import {
   WhatsAppWebhookBody,
   WhatsAppStatus,
 } from "./types/whatsapp";
-import { sessions, Session, PurposeId } from "./state/session";
+import { sessions, Session, Step } from "./state/session";
 
 dotenv.config();
 
 /** ---- Env ---- */
 const {
   PORT = "3000",
-  VERIFY_TOKEN,
-  APP_SECRET,
-  GRAPH_API_VERSION = "v21.0",
   WHATSAPP_ACCESS_TOKEN,
   WHATSAPP_PHONE_NUMBER_ID,
+  VERIFY_TOKEN,
+  APP_SECRET,
   FORWARD_URL,
   FORWARD_AUTH_HEADER,
-  FORWARD_MEDIA_AS_BASE64 = "false", // prod'da genelde false
-  MEDIA_MAX_BYTES = "10485760",
-
-  WHATSAPP_ENABLE_LOCATION_REQUEST = "false", // true ise (varsa) native konum isteği dener
+  WHATSAPP_ENABLE_LOCATION_REQUEST,
+  MEDIA_MAX_BYTES = "20971520", // 20MB
 } = process.env;
 
-/** ---- Logger imported from config/logger.ts ---- */
-
-logger.info({ 
-  NODE_ENV: process.env.NODE_ENV, 
-  LOG_LEVEL: process.env.LOG_LEVEL,
-  loggerLevel: logger.level
-}, "🚀 Server starting with configuration");
-
-// Log token configuration (masked)
-// Validate WhatsApp token format and length
-if (WHATSAPP_ACCESS_TOKEN) {
-  if (WHATSAPP_ACCESS_TOKEN.length < 100) {
-    logger.warn({
-      tokenLength: WHATSAPP_ACCESS_TOKEN.length,
-      tokenPreview: `${WHATSAPP_ACCESS_TOKEN.substring(0, 20)}...`
-    }, "⚠️ WHATSAPP_ACCESS_TOKEN appears to be truncated or invalid (expected >100 chars)");
-  }
-  if (!WHATSAPP_ACCESS_TOKEN.startsWith('EAA')) {
-    logger.warn({
-      tokenStart: WHATSAPP_ACCESS_TOKEN.substring(0, 10)
-    }, "⚠️ WHATSAPP_ACCESS_TOKEN doesn't start with expected 'EAA' prefix");
-  }
+if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID || !VERIFY_TOKEN) {
+  logger.error("Missing required environment variables");
+  process.exit(1);
 }
 
-logger.info({ 
-  hasWhatsAppToken: !!WHATSAPP_ACCESS_TOKEN,
-  tokenLength: WHATSAPP_ACCESS_TOKEN?.length,
-  tokenPreview: WHATSAPP_ACCESS_TOKEN ? 
-    `${WHATSAPP_ACCESS_TOKEN.substring(0, 20)}...` : 
-    'NO_TOKEN',
-  phoneNumberId: WHATSAPP_PHONE_NUMBER_ID,
-  apiVersion: GRAPH_API_VERSION,
-  hasForwardAuth: !!FORWARD_AUTH_HEADER,
-  forwardAuthPreview: FORWARD_AUTH_HEADER ? 
-    `${FORWARD_AUTH_HEADER.substring(0, 20)}...` : 
-    'NO_AUTH'
-}, "🔑 Token configuration loaded");
-
-if (!VERIFY_TOKEN || !APP_SECRET) {
-  logger.warn("VERIFY_TOKEN/APP_SECRET eksik. Sadece lokal testte kabul edilebilir.");
-}
-if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-  logger.warn("WHATSAPP_ACCESS_TOKEN/PHONE_NUMBER_ID eksik (outbound yok).");
-}
-
-/** ---- Express ---- */
 const app = express();
-app.use(
-  express.json({
-    verify: (req: Request & { rawBody?: Buffer }, _res, buf: Buffer) => {
-      req.rawBody = buf;
-    },
-  })
+
+app.use(express.raw({ type: "application/json" }));
+app.use((req: Request & { rawBody?: Buffer }, res: Response, next) => {
+  if (req.method === "POST" && req.headers["content-type"] === "application/json") {
+    req.rawBody = req.body;
+    req.body = JSON.parse(req.body.toString());
+  }
+  next();
+});
+
+/** ---- Graph API client with interceptors ---- */
+const graph: AxiosInstance = axios.create({
+  baseURL: "https://graph.facebook.com/v21.0",
+  headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
+});
+
+// Request interceptor
+graph.interceptors.request.use(
+  (config) => {
+    const logContext = {
+      method: config.method?.toUpperCase(),
+      url: (config.baseURL || '') + (config.url || ''),
+      headers: {
+        ...config.headers,
+        Authorization: config.headers?.Authorization ? 
+          `${String(config.headers.Authorization).substring(0, 20)}...` : 
+          undefined
+      },
+      data: config.data ? JSON.stringify(config.data).length : 0
+    };
+    
+    logger.debug(logContext, `📡 Graph API Request: ${config.method?.toUpperCase()} ${config.url} | Data size: ${logContext.data} bytes`);
+    return config;
+  },
+  (error) => Promise.reject(error)
 );
 
-/** ---- Graph client & helpers ---- */
-const graph: AxiosInstance = axios.create({
-  baseURL: `https://graph.facebook.com/${GRAPH_API_VERSION}`,
-  headers: WHATSAPP_ACCESS_TOKEN
-    ? { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` }
-    : undefined,
-  timeout: 30000, // Increased for slower WhatsApp API responses
-});
-
-// Request interceptor - log request details
-graph.interceptors.request.use((config) => {
-  const fullUrl = `${config.baseURL || ''}${config.url || ''}`;
-  const authHeader = config.headers.Authorization;
-  const maskedAuth = typeof authHeader === 'string' ? 
-    `${authHeader.substring(0, 20)}...` : 
-    undefined;
-    
-  const logContext = {
-    method: config.method?.toUpperCase(),
-    url: fullUrl,
-    headers: {
-      ...config.headers,
-      // Mask sensitive headers
-      Authorization: maskedAuth
-    },
-    data: config.data,
-    tokenPreview: WHATSAPP_ACCESS_TOKEN ? 
-      `${WHATSAPP_ACCESS_TOKEN.substring(0, 20)}...` : 
-      'NO_TOKEN'
-  };
-  
-  logger.debug(logContext, `📤 Graph API Request: ${config.method?.toUpperCase()} ${fullUrl}`);
-  return config;
-});
-
-// Response interceptor - log response details
+// Response interceptor
 graph.interceptors.response.use(
   (response) => {
     const logContext = {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
-      data: response.data,
-      url: response.config.url
+      url: response.config.url,
+      method: response.config.method?.toUpperCase(),
+      responseSize: JSON.stringify(response.data).length
     };
     
-    logger.debug(logContext, `📥 Graph API Response: ${response.status} ${response.statusText} for ${response.config.url}`);
+    logger.debug(logContext, `📥 Graph API Response: ${response.status} ${response.statusText} for ${response.config.method?.toUpperCase()} ${response.config.url} | Size: ${logContext.responseSize} bytes`);
     return response;
   },
   (error) => {
     const logContext = {
       status: error.response?.status,
       statusText: error.response?.statusText,
-      headers: error.response?.headers,
-      data: error.response?.data,
       url: error.config?.url,
-      message: error.message,
-      tokenPreview: WHATSAPP_ACCESS_TOKEN ? 
-        `${WHATSAPP_ACCESS_TOKEN.substring(0, 20)}...` : 
-        'NO_TOKEN'
+      method: error.config?.method?.toUpperCase(),
+      error: error.message,
+      data: error.response?.data
     };
     
-    logger.error(logContext, `❌ Graph API Error: ${error.response?.status} ${error.response?.statusText} for ${error.config?.url}`);
+    logger.error(logContext, `❌ Graph API Error: ${error.response?.status} ${error.response?.statusText} for ${error.config?.method?.toUpperCase()} ${error.config?.url} | Error: ${error.message}`);
     return Promise.reject(error);
   }
 );
 
+/** ---- Graph send helper ---- */
 async function graphSend(payload: AnyObject) {
-  const logContext = {
-    from: WHATSAPP_PHONE_NUMBER_ID,
+  const logPayload = {
     to: payload.to,
     type: payload.type,
-    messageContent: payload.type === 'text' ? (payload as any).text?.body : 
-                   payload.type === 'interactive' ? (payload as any).interactive?.type :
-                   payload.type,
-    apiEndpoint: `/${WHATSAPP_PHONE_NUMBER_ID}/messages`
+    phone_number_id: WHATSAPP_PHONE_NUMBER_ID,
+    payload_size: JSON.stringify(payload).length
   };
   
-  logger.debug(logContext, `📤 Sending ${payload.type} message from bot(${WHATSAPP_PHONE_NUMBER_ID}) to user(${payload.to})`);
-  
+  logger.debug(logPayload, `📤 Sending ${payload.type} message: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Size: ${logPayload.payload_size} bytes`);
+
   try {
-    const { data } = await graph.post(`/${WHATSAPP_PHONE_NUMBER_ID}/messages`, payload);
-    const messageId = data?.messages?.[0]?.id;
-    const whatsappMessageId = data?.messages?.[0]?.message_id;
+    const { data } = await graph.post(`/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      ...payload,
+      messaging_product: "whatsapp"
+    });
     
-    logger.info({ 
-      ...logContext,
-      messageId,
-      whatsappMessageId,
-      responseStatus: 'success'
-    }, `✅ ${payload.type} message delivered successfully: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | msgId: ${messageId}`);
-    
-    // Track outgoing message ID in session
-    if (messageId && payload.to) {
-      const phoneNumber = payload.to as string;
-      const s = sessions.get(phoneNumber);
-      if (s) {
-        s.messageIds.add(messageId);
-        s.stateMessageMap.set(messageId, s.step);
-        sessions.set(phoneNumber, s);
-      }
-    }
+    logger.debug({ 
+      messageId: data.messages?.[0]?.id,
+      to: payload.to,
+      type: payload.type,
+      status: 'sent'
+    }, `✅ Message sent successfully: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Type: ${payload.type} | ID: ${data.messages?.[0]?.id}`);
     
     return data;
   } catch (error: any) {
-    logger.error({ 
-      ...logContext,
+    logger.error({
+      to: payload.to,
+      type: payload.type,
       error: error.message,
-      httpStatus: error.response?.status,
-      responseData: error.response?.data,
-      stack: error.stack
+      status: error.response?.status,
+      data: error.response?.data
     }, `❌ Failed to send ${payload.type} message: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Error: ${error.message}`);
     throw error;
   }
@@ -230,38 +165,9 @@ async function sendInteractiveButtons(
   });
 }
 
-type ListRow = { id: string; title: string; description?: string };
-async function sendInteractiveList(
-  to: string,
-  headerText: string | undefined,
-  bodyText: string,
-  buttonText: string,
-  sections: Array<{ title?: string; rows: ListRow[] }>
-) {
-  // Toplam row <= 10 kuralı:
-  const total = sections.reduce((acc, s) => acc + s.rows.length, 0);
-  if (total > 10) throw new Error("List total rows cannot exceed 10.");
-
-  const interactive: AnyObject = {
-    type: "list",
-    body: { text: bodyText },
-    action: {
-      button: buttonText,
-      sections: sections.map((s) => ({
-        ...(s.title ? { title: s.title } : {}),
-        rows: s.rows,
-      })),
-    },
-  };
-  if (headerText) interactive.header = { type: "text", text: headerText };
-  return graphSend({ messaging_product: "whatsapp", to, type: "interactive", interactive });
-}
-
-/** Konum isteği – bazı bölgelerde native "location request" olabilir; yoksa fallback metin */
+/** Location request */
 async function requestLocation(to: string) {
   if (String(WHATSAPP_ENABLE_LOCATION_REQUEST).toLowerCase() === "true") {
-    // Uygunsa (destekliyorsa) deneyin:
-    // NOT: Uygulamada destek yoksa bu çağrı 400 döndürebilir; o yüzden try/fallback yapıyoruz.
     try {
       return await graphSend({
         messaging_product: "whatsapp",
@@ -282,89 +188,88 @@ async function requestLocation(to: string) {
       }, "❌ Native location_request_message failed; falling back to text message");
     }
   }
-  // Fallback: düz metin
   return await sendText(
     to,
     "Lütfen WhatsApp'ta ataç menüsünden (📎) *Konum* seçip mevcut konumunuzu paylaşın."
   );
 }
 
-/** Amaç seçenekleri */
-const PURPOSES: Array<{ id: PurposeId; title: string; description?: string }> = [
-  { id: "shift_start", title: "Mesai Başlangıcı" },
-  { id: "shift_end", title: "Mesai Bitimi" },
-  { id: "new_task_start", title: "Yeni İşe Başlama" },
-  { id: "task_finish", title: "Bir İşin Bitişi" },
-  { id: "issue_report", title: "Sorun Bildirme" },
-];
-
-async function askPurposeList(to: string) {
-  const rows: ListRow[] = PURPOSES.map((p) => ({
-    id: `purpose:${p.id}`,
-    title: p.title,
-    description: p.description,
-  }));
-  return sendInteractiveList(
-    to,
-    "Lütfen amacınızı seçin",
-    "Bu bildirimin amacı nedir?",
-    "Seçenekler",
-    [{ rows }]
-  );
-}
-
-/** Mock: Kullanıcıya atanmış işler (en çok 9) */
-// TODO: PROD: DB'den/servisten çek (assignments, görevler), sıralamayı iş kurallarıyla yap
-function fetchAssignedJobsFor(phone: string, _purpose: PurposeId) {
-  // Basit örnek: 6 iş
-  return [
-    { id: "J-1001", title: "Alan 3A", description: "Blok A - 3. kat mekanik montaj" },
-    { id: "J-1002", title: "Pano-2", description: "Blok B - Elektrik pano kontrol" },
-    { id: "J-1003", title: "Lojistik", description: "Şantiye ofis malzeme teslimi" },
-    { id: "J-1004", title: "Dış cephe", description: "Isı yalıtımı kalite kontrol" },
-    { id: "J-1005", title: "Blok C", description: "Asansör kuyusu temizlik" },
-    { id: "J-1006", title: "Bodrum -2", description: "Acil: Su kaçağı tespiti" },
-  ].slice(0, 9);
-}
-
-async function askJobList(to: string, phone: string, purpose: PurposeId) {
-  const jobs = fetchAssignedJobsFor(phone, purpose);
+// Helper function for two-part state transition logging
+function transitionState(
+  session: Session, 
+  newState: Step, 
+  trigger: string, 
+  messageId: string
+): Session {
+  const oldState = session.step;
+  const transitionStartTime = Date.now();
   
-  // Handle empty job list
-  if (jobs.length === 0) {
-    const rows: ListRow[] = [
-      { id: "job:independent", title: "Bağımsız bildirim", description: "Atanmış iş bulunmuyor - serbest bildirim yap" },
-    ];
-    return sendInteractiveList(
-      to,
-      "İş bulunamadı",
-      "Size atanmış iş bulunmuyor. Bağımsız bildirim yapabilirsiniz.",
-      "Devam",
-      [{ rows }]
+  // LOG: STATE_TRANSITION_BEGIN
+  logger.info({
+    event: 'STATE_TRANSITION_BEGIN',
+    phone: session.user,
+    workflowId: session.workflowId,
+    messageId,
+    fromState: oldState,
+    trigger,
+    timestamp: new Date().toISOString()
+  }, `🔄 STATE_TRANSITION_BEGIN: Phone: ${session.user} | Workflow: ${session.workflowId} | Message: ${messageId} | From: ${oldState} | Trigger: ${trigger}`);
+  
+  // Perform the actual state change
+  session.step = newState;
+  session.lastActivityAt = Date.now();
+  sessions.set(session.user, session);
+  
+  // LOG: STATE_TRANSITION_END
+  logger.info({
+    event: 'STATE_TRANSITION_END',
+    phone: session.user,
+    workflowId: session.workflowId,
+    messageId,
+    fromState: oldState,
+    toState: newState,
+    trigger,
+    transitionDuration: Date.now() - transitionStartTime,
+    timestamp: new Date().toISOString()
+  }, `✅ STATE_TRANSITION_END: Phone: ${session.user} | Workflow: ${session.workflowId} | Message: ${messageId} | Transition: ${oldState} → ${newState} | Trigger: ${trigger}`);
+  
+  return session;
+}
+
+// Helper function to handle mid-flow image decision
+async function handleMidFlowImage(from: string, session: Session, messageId: string) {
+  if (session.hasDescriptions) {
+    logger.info({
+      event: 'MID_FLOW_MEDIA_DECISION',
+      phone: from,
+      workflowId: session.workflowId,
+      messageId,
+      currentState: session.step,
+      descriptionsCount: session.descriptions.length,
+      timestamp: new Date().toISOString()
+    }, `❓ MID_FLOW_MEDIA_DECISION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Descriptions: ${session.descriptions.length}`);
+    
+    return sendInteractiveButtons(from, 
+      "Mevcut akışı kaydedip yeni akış başlatmak ister misiniz?",
+      [
+        {id: "save_new", title: "Evet"}, 
+        {id: "continue", title: "Hayır"}
+      ]
     );
+  } else {
+    logger.info({
+      event: 'MID_FLOW_NO_DESCRIPTIONS',
+      phone: from,
+      workflowId: session.workflowId,
+      messageId,
+      timestamp: new Date().toISOString()
+    }, `❓ MID_FLOW_NO_DESCRIPTIONS: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId}`);
+    
+    return sendText(from, "Henüz açıklama yapmadınız. Lütfen sesli veya yazılı açıklama gönderin.");
   }
-  
-  const rows: ListRow[] = [
-    ...jobs.map((j) => ({ id: `job:${j.id}`, title: j.title, description: j.description })),
-    { id: "job:independent", title: "Bunlardan bağımsız", description: "Serbest bildirim" },
-  ];
-  return sendInteractiveList(
-    to,
-    "İş seçin",
-    "Size atanmış işlerden birini seçin ya da bağımsız bildirim yapın.",
-    "İşler",
-    [{ rows }]
-  );
 }
 
-async function askNoteDecision(to: string) {
-  return sendInteractiveButtons(to, "Bu iş için ek bilgi var mı?", [
-    { id: "note:add", title: "Var" },
-    { id: "note:skip", title: "Yok" },
-  ]);
-}
-
-/** ---- İmza doğrulama ---- */
+/** ---- Signature verification ---- */
 function verifySignature(req: Request & { rawBody?: Buffer }): boolean {
   if (!APP_SECRET) return true;
   const signature = req.header("X-Hub-Signature-256") ?? "";
@@ -379,68 +284,32 @@ function verifySignature(req: Request & { rawBody?: Buffer }): boolean {
   }
 }
 
-/** ---- Media helpers (ephemeral URL / indirme) ---- */
+/** ---- Media helpers (ephemeral URL / download) ---- */
 async function getMediaUrl(mediaId: string): Promise<string> {
   const { data } = await graph.get<{ url: string }>(`/${mediaId}`);
   return data.url;
 }
+
 async function downloadMedia(mediaUrl: string, maxBytes: number) {
-  const logContext = {
-    url: mediaUrl,
-    maxBytes,
-    timeout: 20000
-  };
-  
-  logger.debug(logContext, `📥 Media Download Request: GET ${mediaUrl}`);
-  
   try {
     const res = await axios.get<ArrayBuffer>(mediaUrl, { responseType: "arraybuffer", timeout: 20000 });
-    
-    const responseLogContext = {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-      contentLength: res.headers['content-length'],
-      contentType: res.headers['content-type'],
-      url: mediaUrl
-    };
-    
-    logger.debug(responseLogContext, `📥 Media Download Response: ${res.status} ${res.statusText} for ${mediaUrl}`);
-    
     const buf = Buffer.from(res.data);
     if (buf.length > maxBytes) throw new Error(`Media too large: ${buf.length} > ${maxBytes}`);
     const contentType = (res.headers["content-type"] as string) || "application/octet-stream";
-    
-    logger.debug({ 
-      url: mediaUrl, 
-      size: buf.length, 
-      contentType,
-      base64Length: buf.toString("base64").length 
-    }, `✅ Media Download Success: ${mediaUrl} (${buf.length} bytes, ${contentType})`);
-    
     return { base64: buf.toString("base64"), content_type: contentType, size: buf.length };
   } catch (error: any) {
-    const errorLogContext = {
-      url: mediaUrl,
-      error: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      headers: error.response?.headers
-    };
-    
-    logger.error(errorLogContext, `❌ Media Download Error: ${error.message} for ${mediaUrl}`);
+    logger.error({ url: mediaUrl, error: error.message }, `❌ Media Download Error`);
     throw error;
   }
 }
 
-/** ---- Forward with retry (iş güncelleme mock'u için) ---- */
+/** ---- Forward with retry ---- */
 async function forwardWithRetry(payload: AnyObject, maxAttempts = 5): Promise<void> {
   if (!FORWARD_URL) {
-    logger.debug({ payloadKind: payload.kind }, `📤 Forward skipped: No FORWARD_URL configured for ${payload.kind} payload | Data logged only`);
+    logger.debug({ payloadKind: payload.kind }, `📤 Forward skipped: No FORWARD_URL configured`);
     return;
   }
   
-  logger.debug({ url: FORWARD_URL, payloadKind: payload.kind }, `🔄 Forward initiated: Sending ${payload.kind} payload to ${FORWARD_URL} (max ${maxAttempts} attempts)`);
   let attempt = 0, delay = 500;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (FORWARD_AUTH_HEADER) headers["Authorization"] = FORWARD_AUTH_HEADER;
@@ -448,107 +317,64 @@ async function forwardWithRetry(payload: AnyObject, maxAttempts = 5): Promise<vo
   while (attempt < maxAttempts) {
     attempt++;
     try {
-      const requestLogContext = {
-        attempt,
-        delay,
-        url: FORWARD_URL,
-        method: 'POST',
-        headers: {
-          ...headers,
-          // Mask auth header if present
-          Authorization: headers.Authorization ? 
-            `${headers.Authorization.substring(0, 20)}...` : 
-            undefined
-        },
-        payloadSize: JSON.stringify(payload).length,
-        timeout: 15000
-      };
-      
-      logger.debug(requestLogContext, `📡 Forward attempt ${attempt}/${maxAttempts}: POST to ${FORWARD_URL} | Delay: ${delay}ms`);
+      logger.debug({ attempt, url: FORWARD_URL }, `📡 Forward attempt ${attempt}/${maxAttempts}`);
       
       const response = await axios.post(FORWARD_URL, payload, { headers, timeout: 15000 });
       
-      const responseLogContext = {
-        attempt,
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-        data: response.data,
-        url: FORWARD_URL
-      };
-      
-      logger.debug(responseLogContext, `📥 Forward Response: ${response.status} ${response.statusText} for ${FORWARD_URL}`);
-      logger.info({ attempt, payloadKind: payload.kind }, `✅ Forward success: ${payload.kind} payload delivered to ${FORWARD_URL} on attempt ${attempt}`);
+      logger.info({ attempt, payloadKind: payload.kind }, `✅ Forward success`);
       return;
     } catch (e: any) {
-      const errorLogContext = {
-        attempt,
-        maxAttempts,
-        url: FORWARD_URL,
-        error: e?.message,
-        status: e?.response?.status,
-        statusText: e?.response?.statusText,
-        headers: e?.response?.headers,
-        data: e?.response?.data
-      };
-      
-      logger.warn(errorLogContext, `❌ Forward attempt ${attempt}/${maxAttempts} failed: POST to ${FORWARD_URL} | Error: ${e?.message} | Status: ${e?.response?.status}`);
+      logger.warn({ attempt, maxAttempts, error: e?.message }, `❌ Forward attempt ${attempt}/${maxAttempts} failed`);
       if (attempt >= maxAttempts) {
-        logger.error({ maxAttempts, payloadKind: payload.kind }, `💥 Forward completely failed: ${payload.kind} payload to ${FORWARD_URL} after ${maxAttempts} attempts | Giving up`);
+        logger.error({ maxAttempts, payloadKind: payload.kind }, `💥 Forward completely failed`);
         throw e;
       }
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, 8000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay *= 2;
     }
   }
 }
 
-/** ---- Normalize inbound ---- */
-function normalizeMessage(msg: WhatsAppMessage): NormalizedMessage {
-  const ts = Number((msg as any).timestamp || 0) * 1000;
-  const base = { wa_message_id: (msg as any).id, from: (msg as any).from, timestamp: ts };
-  logger.debug({ messageId: base.wa_message_id, type: (msg as any).type }, `🔄 Normalizing ${(msg as any).type} message: ${base.wa_message_id} from user(${base.from})`);
+/** ---- Message normalization ---- */
+function normalizeMessage(raw: WhatsAppMessage): NormalizedMessage {
+  const ts = Number((raw as any).timestamp) * 1000 || Date.now();
+  const base = { 
+    wa_message_id: (raw as any).id, 
+    from: (raw as any).from, 
+    timestamp: ts,
+    context: (raw as any).context  // Preserve context for reply detection
+  };
 
-  switch (msg.type) {
+  switch (raw.type) {
     case "text":
-      return { ...base, type: "text", text: (msg as any).text?.body ?? "" };
+      return { ...base, type: "text", text: (raw as any).text?.body || "" };
     case "image":
     case "document":
     case "audio":
-    case "video": {
-      const media = (msg as any)[msg.type] || {};
+    case "video":
+      const media = (raw as any)[raw.type];
       return {
         ...base,
-        type: msg.type as any,
+        type: raw.type,
         media: {
-          kind: msg.type as any,
-          id: media.id,
-          mime_type: media.mime_type,
-          sha256: media.sha256,
-          filename: media.filename,
-          caption: media.caption,
+          kind: raw.type,
+          id: media?.id,
+          mime_type: media?.mime_type,
+          sha256: media?.sha256,
+          filename: media?.filename,
+          caption: media?.caption,
         },
       };
-    }
     case "location":
-      return {
-        ...base,
-        type: "location",
-        location: {
-          latitude: (msg as any).location?.latitude,
-          longitude: (msg as any).location?.longitude,
-          name: (msg as any).location?.name,
-          address: (msg as any).location?.address,
-        },
-      };
+      return { ...base, type: "location", location: (raw as any).location || {} };
     case "interactive":
-      return { ...base, type: "interactive", interactive: (msg as any).interactive || {} };
+      return { ...base, type: "interactive", interactive: (raw as any).interactive || {} };
     default:
-      return { ...base, type: (msg as any).type, raw: msg as unknown as AnyObject };
+      return { ...base, type: raw.type, raw: raw as unknown as AnyObject };
   }
 }
 
-/** ---- Sağlık uçları + Webhook verify ---- */
+/** ---- Health endpoints + Webhook verify ---- */
 app.get("/healthz", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 app.get("/readyz", (_req, res) => res.status(200).json({ ready: true }));
 app.get("/whatsapp/webhook", (req, res) => {
@@ -562,452 +388,394 @@ app.get("/whatsapp/webhook", (req, res) => {
 /** ---- Idempotency ---- */
 const seen = new TTLCache();
 
+// 2-minute timeout cleanup
+async function cleanupInactiveSessions() {
+  const now = Date.now();
+  const timeoutMs = 120000; // 2 minutes
+  
+  for (const [phone, session] of (sessions as any).map.entries()) {
+    const idleTime = now - session.lastActivityAt;
+    
+    if (idleTime > timeoutMs) {
+      logger.warn({
+        event: 'WORKFLOW_TIMEOUT',
+        phone,
+        workflowId: session.workflowId,
+        lastState: session.step,
+        idleTime,
+        lastActivityAt: new Date(session.lastActivityAt).toISOString(),
+        descriptionsCollected: session.descriptions.length,
+        timestamp: new Date().toISOString()
+      }, `⏱️ WORKFLOW_TIMEOUT: Phone: ${phone} | Workflow: ${session.workflowId} | State: ${session.step} | Idle: ${idleTime}ms`);
+      
+      await sendText(phone, "⏱️ Akış zaman aşımına uğradı. Yeni görsel göndererek başlayın.");
+      sessions['map'].delete(phone);
+      
+      logger.info({
+        event: 'SESSION_DELETED',
+        phone,
+        workflowId: session.workflowId,
+        reason: 'timeout',
+        timestamp: new Date().toISOString()
+      }, `🗑️ SESSION_DELETED: Phone: ${phone} | Workflow: ${session.workflowId} | Reason: timeout`);
+    }
+  }
+}
+
+// Run cleanup every 30 seconds
+setInterval(cleanupInactiveSessions, 30000);
+
+/** ---- Workflow completion ---- */
+async function finalizeWorkflow(session: Session, triggerMessageId: string) {
+  const duration = Date.now() - session.createdAt;
+  
+  logger.info({
+    event: 'WORKFLOW_FINALIZATION_BEGIN',
+    phone: session.user,
+    workflowId: session.workflowId,
+    messageId: triggerMessageId,
+    timestamp: new Date().toISOString()
+  }, `🏁 WORKFLOW_FINALIZATION_BEGIN: Phone: ${session.user} | Workflow: ${session.workflowId} | Message: ${triggerMessageId}`);
+  
+  // Prepare and forward data
+  const payload = {
+    kind: "workflow_complete",
+    workflowId: session.workflowId,
+    user: session.user,
+    location: session.location,
+    media: session.media,
+    descriptions: session.descriptions,
+    workflow_start: session.createdAt,
+    workflow_end: Date.now(),
+    duration
+  };
+  
+  try {
+    await forwardWithRetry(payload);
+    
+    logger.info({
+      event: 'WORKFLOW_DATA_FORWARDED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      forwardUrl: FORWARD_URL || 'none',
+      payloadSize: JSON.stringify(payload).length,
+      timestamp: new Date().toISOString()
+    }, `📤 WORKFLOW_DATA_FORWARDED: Phone: ${session.user} | Workflow: ${session.workflowId} | Size: ${JSON.stringify(payload).length} bytes`);
+    
+  } catch (error: any) {
+    logger.error({
+      event: 'WORKFLOW_FORWARD_FAILED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }, `❌ WORKFLOW_FORWARD_FAILED: Phone: ${session.user} | Workflow: ${session.workflowId} | Error: ${error.message}`);
+  }
+  
+  await sendText(session.user, "✅ Teşekkürler, açıklamanız alındı ve kaydedildi.");
+  
+  logger.info({
+    event: 'WORKFLOW_COMPLETE',
+    phone: session.user,
+    workflowId: session.workflowId,
+    messageId: triggerMessageId,
+    duration,
+    metrics: {
+      mediaCount: session.media.length,
+      descriptionsCount: session.descriptions.length,
+      textDescriptions: session.descriptions.filter(d => d.type === 'text').length,
+      audioDescriptions: session.descriptions.filter(d => d.type === 'audio').length
+    },
+    timestamp: new Date().toISOString()
+  }, `✅ WORKFLOW_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Descriptions: ${session.descriptions.length}`);
+}
+
 /** ---- Webhook (POST) ---- */
 app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: Response) => {
-  logger.debug({ headers: req.headers, bodySize: req.rawBody?.length }, `🔄 Webhook POST received: ${req.rawBody?.length || 0} bytes | Headers: ${Object.keys(req.headers).join(', ')}`);
+  logger.debug({ headers: req.headers, bodySize: req.rawBody?.length }, `🔄 Webhook POST received`);
   
   if (!verifySignature(req)) {
     logger.warn({ signature: req.headers['x-hub-signature-256'] }, "❌ Signature verification failed");
     return res.sendStatus(401);
   }
   
-  logger.debug(`✅ Webhook signature verified, processing webhook data`);
+  logger.debug(`✅ Webhook signature verified`);
 
   try {
-      const body = req.body as WhatsAppWebhookBody;
-      const entries = body?.entry ?? [];
-      logger.debug({ entriesCount: entries.length }, `📦 Processing webhook: ${entries.length} entry(ies) from WhatsApp`);
-      for (const entry of entries) {
-        for (const ch of entry?.changes ?? []) {
-          const value = ch?.value;
-          if (!value) continue;
+    const body = req.body as WhatsAppWebhookBody;
+    const entries = body?.entry ?? [];
+    logger.debug({ entriesCount: entries.length }, `📦 Processing webhook: ${entries.length} entries`);
+    
+    for (const entry of entries) {
+      for (const ch of entry?.changes ?? []) {
+        const value = ch?.value;
+        if (!value) continue;
 
-          // Status event'leri yine forward edelim (opsiyonel)
-          for (const st of value.statuses ?? []) {
-            const sid = st.id ?? `${st.recipient_id}:${st.status}:${st.timestamp}`;
-            if (seen.has(sid)) {
-              logger.debug({ statusId: sid }, `⏭️ Status update skipped: ${sid} already processed (idempotency)`);
+        // Status events
+        for (const st of value.statuses ?? []) {
+          const sid = st.id ?? `${st.recipient_id}:${st.status}:${st.timestamp}`;
+          if (seen.has(sid)) continue;
+          logger.debug({ status: st.status, recipientId: st.recipient_id }, `📊 Processing status update`);
+          seen.set(sid);
+          await forwardWithRetry({ kind: "status", metadata: value.metadata, status: st } as AnyObject);
+        }
+
+        // Messages
+        for (const raw of value.messages ?? []) {
+          const mid = (raw as any).id as string;
+          if (!mid || seen.has(mid)) continue;
+          seen.set(mid);
+
+          const msg = normalizeMessage(raw);
+          const from = msg.from;
+          
+          const contentPreview = msg.type === 'text' ? (msg as any).text : 
+                                 msg.type === 'location' ? `lat:${(msg as any).location?.latitude}, lng:${(msg as any).location?.longitude}` :
+                                 msg.type === 'interactive' ? (msg as any).interactive?.type :
+                                 msg.type;
+          
+          logger.info({ 
+            messageId: mid, 
+            from, 
+            to: WHATSAPP_PHONE_NUMBER_ID,
+            type: msg.type,
+            content: contentPreview,
+            timestamp: new Date(msg.timestamp).toISOString()
+          }, `💬 Received ${msg.type} message: user(${from}) → bot(${WHATSAPP_PHONE_NUMBER_ID}) | Content: "${contentPreview}" | MsgId: ${mid}`);
+          
+          // Log message received
+          logger.info({
+            event: 'MESSAGE_RECEIVED',
+            phone: from,
+            messageId: mid,
+            messageType: msg.type,
+            timestamp: new Date().toISOString()
+          }, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
+          
+          let s = sessions.get(from) || sessions.new(from);
+
+          // --- SIMPLIFIED FSM ---
+          
+          // GLOBAL: Image/Video handler (resets FSM from any state)
+          if (msg.type === "image" || msg.type === "video") {
+            const mediaId = (msg as any).media?.id || (msg as any).image?.id || (msg as any).video?.id;
+            
+            // Handle mid-flow image/video
+            if (s.step === "awaiting_description") {
+              await handleMidFlowImage(from, s, mid);
               continue;
             }
-            logger.debug({ status: st.status, recipientId: st.recipient_id }, `📊 Processing status update: ${st.status} for recipient ${st.recipient_id}`);
-            seen.set(sid);
-            await forwardWithRetry({ kind: "status", metadata: value.metadata, status: st });
+            
+            // Reset workflow
+            const oldWorkflowId = s.workflowId || 'none';
+            const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
+            
+            logger.info({
+              event: 'WORKFLOW_RESET',
+              phone: from,
+              oldWorkflowId,
+              newWorkflowId,
+              messageId: mid,
+              previousState: s.step,
+              reason: 'new_media',
+              timestamp: new Date().toISOString()
+            }, `🔄 WORKFLOW_RESET: Phone: ${from} | Old: ${oldWorkflowId} | New: ${newWorkflowId} | Message: ${mid}`);
+            
+            s = sessions.new(from);
+            s.workflowId = newWorkflowId;
+            s.media.push({type: msg.type as "image" | "video", id: mediaId});
+            
+            transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
+            await requestLocation(from);
+            continue;
           }
-
-          // Messages
-          for (const raw of value.messages ?? []) {
-            const mid = (raw as any).id as string;
-            if (!mid || seen.has(mid)) {
-              logger.debug({ messageId: mid }, `⏭️ Message skipped: ${mid} already processed (idempotency)`);
-              continue;
-            }
-            seen.set(mid);
-
-            const msg = normalizeMessage(raw);
-            const from = msg.from;
+          
+          // Handle mid-flow button decisions
+          if (s.step === "awaiting_description" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
+            const buttonId = (msg as any).interactive.button_reply.id;
             
-            // Debug interactive messages with context
-            if (msg.type === 'interactive') {
-              logger.debug({ 
-                from,
-                hasContext: !!(msg as any).context,
-                context: (msg as any).context,
-                rawInteractive: (raw as any).interactive,
-                normalizedInteractive: (msg as any).interactive,
-                listReply: (msg as any).interactive?.list_reply,
-                rawListReply: (raw as any).interactive?.list_reply
-              }, `🔍 Interactive message structure debugging`);
-            }
-            
-            const contentPreview = msg.type === 'text' ? (msg as any).text : 
-                                   msg.type === 'location' ? `lat:${(msg as any).location?.latitude}, lng:${(msg as any).location?.longitude}` :
-                                   msg.type === 'interactive' ? (msg as any).interactive?.type :
-                                   msg.type;
-            
-            logger.info({ 
-              messageId: mid, 
-              from, 
-              to: WHATSAPP_PHONE_NUMBER_ID,
-              type: msg.type,
-              content: contentPreview,
-              timestamp: new Date(msg.timestamp).toISOString()
-            }, `💬 Received ${msg.type} message: user(${from}) → bot(${WHATSAPP_PHONE_NUMBER_ID}) | Content: "${contentPreview}" | MsgId: ${mid}`);
-            
-            let s = sessions.get(from) || sessions.new(from);
-            logger.debug({ from, step: s.step, sessionExists: sessions.get(from) ? true : false }, `👤 Session for user(${from}): step="${s.step}" | ${sessions.get(from) ? 'existing' : 'new'} session`);
-            
-            // Track incoming message ID
-            if (msg.wa_message_id) {
-              s.messageIds.add(msg.wa_message_id);
-              s.stateMessageMap.set(msg.wa_message_id, s.step);
-              s.updatedAt = Date.now();
-            }
-
-            // --- FSM ---
-            // REPLY HANDLER - Check for replies to active flow messages
-            const replyContext = (msg as any).context;
-            logger.debug({ from, replyContext, hasContext: !!replyContext }, `🔄 Reply detection: user(${from}) | Context: ${JSON.stringify(replyContext)}`);
-            
-            if (replyContext?.id && !replyContext.forwarded) {
-              const replyToId = replyContext.id;
-              const isActiveFlowReply = s.messageIds.has(replyToId);
-              logger.debug({ from, replyToId, isActiveFlowReply, messageIds: Array.from(s.messageIds) }, `🔄 Reply check: replyToId(${replyToId}) in messageIds: ${isActiveFlowReply}`);
+            if (buttonId === "save_new") {
+              logger.info({
+                event: 'WORKFLOW_SAVE_AND_NEW',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                timestamp: new Date().toISOString()
+              }, `💾 WORKFLOW_SAVE_AND_NEW: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
               
-              // If flow is completed, treat all replies as old flow
-              if (isActiveFlowReply && s.step !== "completed") {
-                const originalState = s.stateMessageMap.get(replyToId);
-                logger.debug({ 
-                  from, 
-                  replyToId, 
-                  originalState, 
-                  currentState: s.step,
-                  stateMap: Array.from(s.stateMessageMap.entries())
-                }, `🔄 Reply detected to active flow message`);
-                
-                // State-specific reply handling
-                if (originalState) {
-                  switch (originalState) {
-                    case "awaiting_location":
-                      if (msg.type === "location") {
-                        // Konum düzeltmesi - normal flow'a devam
-                        logger.info({ from }, "📍 Location correction via reply");
-                        // Normal location handler'a düşecek
-                      } else if (msg.type === "text") {
-                        // Text reply to location step - return to original state
-                        s.step = originalState;
-                        sessions.set(from, s);
-                        logger.info({ from, originalState }, "📍 Text reply to location step - returning to original state");
-                        // Let it fall through to normal fallback handler
-                      }
-                      break;
-                      
-                    case "awaiting_purpose":
-                      if (msg.type === "text") {
-                        // Text reply to purpose step - return to original state
-                        const oldStep = s.step;
-                        s.step = originalState;
-                        sessions.set(from, s);
-                        logger.info({ from, originalState, oldStep, newStep: s.step }, "🎯 Text reply to purpose step - STATE CHANGED");
-                        // Let it fall through to normal fallback handler
-                      } else if (msg.type === "interactive") {
-                        // Liste seçimi via reply - normal handler'a düşsün
-                        logger.info({ from }, "🎯 Purpose selection via reply");
-                      }
-                      break;
-                      
-                    case "awaiting_task":
-                      if (msg.type === "text") {
-                        // Text reply to task step - return to original state
-                        s.step = originalState;
-                        sessions.set(from, s);
-                        logger.info({ from, originalState }, "📋 Text reply to task step - returning to original state");
-                        // Let it fall through to normal fallback handler
-                      } else if (msg.type === "interactive") {
-                        // İş seçimi via reply - normal handler'a düşsün
-                        logger.info({ from }, "📋 Task selection via reply");
-                      }
-                      break;
-                      
-                    case "awaiting_note_decision":
-                      // Karar değişikliği - return to original state
-                      s.step = originalState;
-                      sessions.set(from, s);
-                      logger.info({ from, originalState }, "❓ Text reply to note decision step - returning to original state");
-                      // Let it fall through to normal fallback handler
-                      
-                    case "awaiting_extra":
-                      // Bilgi düzeltmesi - devam et ve override yap
-                      if (msg.type === "text" || msg.type === "audio") {
-                        logger.info({ from }, "💬 Extra info correction via reply");
-                        // Normal handler'a düşecek ve override edecek
-                      }
-                      break;
-                  }
-                }
-              } else {
-                // Eski flow'a reply
-                await sendText(from, 
-                  "⚠️ Önceki bir işleme yanıt verdiniz.\n\n" +
-                  "🔄 Yeni işlem için *görsel/video* gönderin.\n" +
-                  "➡️ Mevcut işleme devam etmek için normal mesaj gönderin."
-                );
-                continue;
-              }
-            }
-
-            // GLOBAL IMAGE/VIDEO HANDLER - Resets FSM from any state
-            if (msg.type === "image" || msg.type === "video") {
-              const mediaId = (msg as any).media?.id;
-              const previousStep = s.step;
+              // Finalize current workflow first
+              await finalizeWorkflow(s, mid);
               
-              // Reset session completely and start fresh
+              // Create new workflow
+              const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
               s = sessions.new(from);
-              s.media.push({ kind: msg.type, id: mediaId || "", caption: (msg as any).media?.caption });
-              s.step = "awaiting_location";
-              sessions.set(from, s);
+              s.workflowId = newWorkflowId;
               
-              logger.debug({ 
-                from, 
-                mediaType: msg.type, 
-                mediaId, 
-                previousStep, 
-                newStep: s.step 
-              }, `🎬 Media received - FSM reset: user(${from}) sent ${msg.type} (id:${mediaId}) | FSM: ${previousStep} → ${s.step}`);
+              await sendText(from, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni bir akışa başlıyoruz.");
+              await sendText(from, "📸 Yeni görsel veya video gönderin.");
+              continue;
               
-              // Kullanıcıyı uygun olmayan state'ten reset edildiyse bilgilendir
-              if (previousStep !== "idle" && previousStep !== "awaiting_location") {
-                await sendText(from, "Yeni görsel alındı, akış baştan başlatılıyor.");
-              }
+            } else if (buttonId === "continue") {
+              logger.info({
+                event: 'WORKFLOW_CONTINUE',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                timestamp: new Date().toISOString()
+              }, `▶️ WORKFLOW_CONTINUE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
               
-              await requestLocation(from);
+              await sendText(from, "📝 Mevcut konuyu açıklamaya devam edin.");
               continue;
             }
-
-            if (s.step === "awaiting_location" && msg.type === "location") {
-              // 2) Lokasyon alındı → amaç listesi
-              const location = (msg as any).location;
-              logger.debug({ from, lat: location.latitude, lng: location.longitude, name: location.name }, `📍 Location received: user(${from}) shared location (${location.latitude},${location.longitude}) "${location.name}" | FSM: awaiting_location → awaiting_purpose`);
-              s.location = {
-                lat: location.latitude,
-                lng: location.longitude,
-                name: location.name,
-                address: location.address,
-              };
-              s.step = "awaiting_purpose";
-              sessions.set(from, s);
-              logger.debug({ from, newStep: s.step }, `🎯 Attempting to send purpose list: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${from}) | FSM: awaiting_location → ${s.step}`);
+          }
+          
+          // State-specific handlers
+          switch(s.step) {
+            case 'idle':
+              if (msg.type !== 'image' && msg.type !== 'video') {
+                logger.info({
+                  event: 'IDLE_NON_MEDIA_MESSAGE',
+                  phone: from,
+                  messageId: mid,
+                  messageType: msg.type,
+                  timestamp: new Date().toISOString()
+                }, `💤 IDLE_NON_MEDIA_MESSAGE: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
+                
+                await sendText(from, "📸 Başlamak için görsel veya video gönderin.");
+              }
+              break;
               
-              try {
-                await askPurposeList(from);
-                logger.debug({ from }, `✅ Purpose list sent successfully`);
-              } catch (error: any) {
-                logger.error({ error: error.message, from }, "❌ Failed to send purpose list");
-                await sendText(from, "Amaç listesi yüklenirken hata oluştu. Lütfen konum paylaşımını tekrar yapın.");
-                s.step = "awaiting_location"; // Revert to previous step
+            case 'awaiting_location':
+              if (msg.type === 'location') {
+                logger.info({
+                  event: 'LOCATION_RECEIVED',
+                  phone: from,
+                  workflowId: s.workflowId,
+                  messageId: mid,
+                  location: {
+                    lat: (msg as any).location?.latitude,
+                    lng: (msg as any).location?.longitude,
+                    name: (msg as any).location?.name
+                  },
+                  timestamp: new Date().toISOString()
+                }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
+                
+                s.location = (msg as any).location;
+                transitionState(s, 'awaiting_description', 'location_received', mid);
+                await sendText(from, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
+              } else {
+                logger.info({
+                  event: 'INVALID_MESSAGE_TYPE',
+                  phone: from,
+                  workflowId: s.workflowId,
+                  messageId: mid,
+                  expectedType: 'location',
+                  receivedType: msg.type,
+                  currentState: s.step,
+                  timestamp: new Date().toISOString()
+                }, `⚠️ INVALID_MESSAGE_TYPE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Expected: location | Got: ${msg.type}`);
+                
+                await requestLocation(from);
+              }
+              break;
+              
+            case 'awaiting_description':
+              if (msg.type === 'text' || msg.type === 'audio') {
+                const descriptionIndex = s.descriptions.length + 1;
+                
+                logger.info({
+                  event: 'DESCRIPTION_ADDED',
+                  phone: from,
+                  workflowId: s.workflowId,
+                  messageId: mid,
+                  descriptionType: msg.type,
+                  descriptionIndex,
+                  totalDescriptions: descriptionIndex,
+                  timestamp: new Date().toISOString()
+                }, `📝 DESCRIPTION_ADDED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Type: ${msg.type} | Index: ${descriptionIndex}`);
+                
+                s.descriptions.push({
+                  type: msg.type as 'text'|'audio',
+                  content: msg.type === 'text' ? (msg as any).text : (msg as any).media?.id,
+                  timestamp: Date.now()
+                });
+                s.hasDescriptions = true;
                 sessions.set(from, s);
+                
+                await sendInteractiveButtons(from, 
+                  "✅ Açıklamanız bittiyse Tamam'a basın.\n📝 Bitmediyse ses kaydı veya yazılı açıklama göndermeye devam edin.",
+                  [{id: "complete", title: "Tamam"}]
+                );
+                
+              } else if (msg.type === 'interactive' && (msg as any).interactive?.button_reply?.id === 'complete') {
+                logger.info({
+                  event: 'COMPLETION_TRIGGERED',
+                  phone: from,
+                  workflowId: s.workflowId,
+                  messageId: mid,
+                  descriptionsCount: s.descriptions.length,
+                  timestamp: new Date().toISOString()
+                }, `🏁 COMPLETION_TRIGGERED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Descriptions: ${s.descriptions.length}`);
+                
+                await finalizeWorkflow(s, mid);
+                transitionState(s, 'completed', 'user_completed', mid);
+              } else {
+                logger.info({
+                  event: 'INVALID_MESSAGE_DURING_DESCRIPTION',
+                  phone: from,
+                  workflowId: s.workflowId,
+                  messageId: mid,
+                  messageType: msg.type,
+                  timestamp: new Date().toISOString()
+                }, `⚠️ INVALID_MESSAGE_DURING_DESCRIPTION: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Type: ${msg.type}`);
+                
+                await sendText(from, 
+                  "💬 Lütfen sesli veya yazılı açıklama yapın.\n\n" +
+                  "🔄 Yeniden başlamak için görsel/video gönderin."
+                );
               }
-              continue;
-            }
-
-            // Debug interactive handler conditions
-            if (msg.type === "interactive") {
-              logger.debug({ 
-                from,
-                step: s.step,
-                stepMatch: s.step === "awaiting_purpose",
-                typeMatch: msg.type === "interactive",
-                hasListReply: !!(msg as any).interactive?.list_reply,
-                listReplyContent: (msg as any).interactive?.list_reply,
-                allConditionsMet: s.step === "awaiting_purpose" && msg.type === "interactive" && !!(msg as any).interactive?.list_reply
-              }, `🔍 Interactive handler condition check`);
-            }
+              break;
             
-            if (s.step === "awaiting_purpose" && msg.type === "interactive" && (msg as any).interactive?.list_reply) {
-              // 3) Amaç seçildi → iş listesi
-              const id = String((msg as any).interactive.list_reply.id || "");
-              logger.debug({ from, listReplyId: id, currentPurpose: s.purpose }, `🎯 Purpose selection attempt: user(${from}) | ID: ${id}`);
-              if (id.startsWith("purpose:")) {
-                const newPurpose = id.slice("purpose:".length) as PurposeId;
-                logger.debug({ from, oldPurpose: s.purpose, newPurpose }, `🎯 Purpose change: ${s.purpose} → ${newPurpose}`);
-                s.purpose = newPurpose;
-                s.step = "awaiting_task";
-                sessions.set(from, s);
-                
-                try {
-                  await askJobList(from, from, s.purpose);
-                  logger.debug({ from, purpose: s.purpose }, `✅ Job list sent successfully`);
-                } catch (error: any) {
-                  logger.error({ error: error.message, from, purpose: s.purpose }, "❌ Failed to send job list");
-                  await sendText(from, "İş listesi yüklenirken hata oluştu. Lütfen amaç seçimini tekrar yapın.");
-                  s.step = "awaiting_purpose"; // Revert to previous step
-                  sessions.set(from, s);
-                }
-              }
-              continue;
-            }
-
-            if (s.step === "awaiting_task" && msg.type === "interactive" && (msg as any).interactive?.list_reply) {
-              // 4) İş seçildi → not kararı veya direkt bilgi alma
-              const id = String((msg as any).interactive.list_reply.id || "");
-              if (id.startsWith("job:")) {
-                s.selectedTaskId = id.slice("job:".length);
-                
-                if (s.selectedTaskId === "independent") {
-                  // Bağımsız bildirim için direkt açıklama iste
-                  s.step = "awaiting_extra";
-                  sessions.set(from, s);
-                  await sendText(from, "Lütfen durumu açıklayın:");
-                } else {
-                  // Normal işler için not ekleme sorusu
-                  s.step = "awaiting_note_decision";
-                  sessions.set(from, s);
-                  await askNoteDecision(from);
-                }
-              }
-              continue;
-            }
-
-            if (s.step === "awaiting_note_decision" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
-              // 5) Not ekle / atla
-              const id = String((msg as any).interactive.button_reply.id || "");
-              if (id === "note:skip") {
-                await finalizeAndUpdateJob(s, value.metadata);
-                sessions.complete(from);
-                continue;
-              }
-              if (id === "note:add") {
-                s.step = "awaiting_extra";
-                sessions.set(from, s);
-                await sendText(from, "Lütfen ek bilgiyi paylaşın:");
-              }
-              continue;
-            }
-
-            if (s.step === "awaiting_extra") {
-              // 6) Text veya audio topla → finalize
-              if (msg.type === "text" && !(msg as any).text?.startsWith("/")) {
-                s.extraNote = (msg as any).text;
-                await finalizeAndUpdateJob(s, value.metadata);
-                sessions.complete(from);
-                continue;
-              }
-              if (msg.type === "audio") {
-                const a = (msg as any).media;
-                s.extraAudio = { id: a?.id, mime_type: a?.mime_type };
-                await finalizeAndUpdateJob(s, value.metadata);
-                sessions.complete(from);
-                continue;
-              }
-              // Başka şey geldiyse görmezden gel ve kullanıcıyı yönlendir:
-              await sendText(from, 
-                "💬 Lütfen *bilgi paylaşın*:\n" +
-                "• Yazılı açıklama yazın\n" +
-                "• Sesli mesaj gönderin\n\n" +
-                "🔄 Yeniden başlamak için *görsel/video* gönderin."
-              );
-              continue;
-            }
-
-            // Handle retry commands for job list
-            if (s.step === "awaiting_task" && msg.type === "text") {
-              const text = (msg as any).text?.toLowerCase().trim();
-              if (text === "liste" || text === "list") {
-                // Retry sending job list
-                try {
-                  await askJobList(from, from, s.purpose!);
-                  logger.debug({ from }, `📋 Job list resent on user request`);
-                } catch (error: any) {
-                  logger.error({ error: error.message, from }, "❌ Failed to resend job list");
-                  await sendText(from, "Liste tekrar gönderilemedi. Lütfen baştan başlayın.");
-                }
-                continue;
-              }
-            }
-
-            // Image/video handling moved to global handler at the top of FSM
-
-            // Diğer mesajları (serbest metin vs.) ack'leyip akış durumuna göre yönlendir
-            logger.debug({ from, step: s.step, msgType: msg.type }, `🔄 Fallback handler: user(${from}) | step: ${s.step} | msgType: ${msg.type}`);
-            switch (s.step) {
-              case "idle":
-                await sendText(from, 
-                  "👋 Merhaba!\n\n" +
-                  "📸 İşlem başlatmak için *görsel/video* gönderin.\n" +
-                  "📋 Bize bildirmek istediğiniz bir durum varsa görseli paylaşın."
-                );
-                break;
+            case 'completed':
+              logger.info({
+                event: 'MESSAGE_AFTER_COMPLETION',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                messageType: msg.type,
+                timestamp: new Date().toISOString()
+              }, `✅ MESSAGE_AFTER_COMPLETION: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Type: ${msg.type}`);
               
-              case "awaiting_location":
-                await sendText(from, 
-                  "📍 Lütfen *konum* paylaşın:\n" +
-                  "📎 menüsünden → Konum → Gönder\n\n" +
-                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
-                );
-                break;
-              
-              case "awaiting_purpose":
-                await sendText(from, 
-                  "🎯 Lütfen *listeden bir amaç* seçin:\n" +
-                  "Yukarıdaki listede bulunan seçeneklere dokunun.\n\n" +
-                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
-                );
-                break;
-              
-              case "awaiting_task":
-                await sendText(from, 
-                  "📋 Lütfen *listeden bir iş* seçin:\n" +
-                  "• Liste gelmemişse: 'liste' yazın\n" +
-                  "• Yukarıdaki seçeneklere dokunun\n\n" +
-                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
-                );
-                break;
-              
-              case "awaiting_note_decision":
-                await sendText(from, 
-                  "❓ Lütfen *butona* dokunun:\n" +
-                  "Yukarıdaki Var/Yok butonlarından birini seçin.\n\n" +
-                  "🔄 Yeniden başlamak için *görsel/video* gönderin."
-                );
-                break;
-              
-            }
-          } // messages
-        } // changes
-      } // entries
+              await sendText(from, "📸 Yeni bir bildirim için görsel veya video gönderin.");
+              break;
+          }
+          
+          // Log message processing complete
+          logger.info({
+            event: 'MESSAGE_PROCESSED',
+            phone: from,
+            workflowId: s.workflowId,
+            messageId: mid,
+            finalState: s.step,
+            timestamp: new Date().toISOString()
+          }, `✅ MESSAGE_PROCESSED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | State: ${s.step}`);
+          
+        } // messages
+      } // changes
+    } // entries
   } catch (err: any) {
     logger.error({ 
       error: err?.message, 
       stack: err?.stack,
       requestBody: req.body,
       headers: req.headers
-    }, `💥 Critical webhook processing error: ${err?.message} | Request body size: ${JSON.stringify(req.body).length} chars`);
+    }, `💥 Critical webhook processing error: ${err?.message}`);
   }
   
-  // Send response after all processing is complete
-  logger.debug(`✅ Webhook processing complete, sending 200 OK to WhatsApp`);
   res.sendStatus(200);
 });
 
-/** ---- İş güncelle (mock) + forward ---- */
-// TODO PROD: Burada gerçek "iş güncelleme" entegrasyonunu yapın
-async function finalizeAndUpdateJob(s: Session, metadata?: AnyObject) {
-  // Medyaları ephemeral URL veya base64 ile forward edelim (kısa ömürlü oldukları için hızlı davranın)
-  const mediaPack = [];
-  for (const m of s.media) {
-    try {
-      const url = await getMediaUrl(m.id);
-      mediaPack.push({ kind: m.kind, id: m.id, media_url: url, caption: m.caption });
-    } catch (e: any) {
-      mediaPack.push({ kind: m.kind, id: m.id, error: e?.message });
-    }
-  }
-
-  const payload = {
-    kind: "job_update",
-    user: s.user,
-    purpose: s.purpose,
-    selectedTaskId: s.selectedTaskId, // "independent" olabilir
-    location: s.location,
-    media: mediaPack,
-    extra: {
-      note: s.extraNote,
-      audio: s.extraAudio,
-    },
-    metadata,
-    // TODO: PROD: burada iş-olay numarası üretip DB'ye yazın; audit trail/log ekleyin
-  };
-
-  await forwardWithRetry(payload);
-  
-  // Different completion messages for independent vs job-specific tasks
-  const completionMessage = s.selectedTaskId === "independent" 
-    ? "Teşekkürler, bildiriminiz alındı ve kaydedildi."
-    : "Teşekkürler, bildiriminiz alındı ve iş üzerine kaydedildi.";
-    
-  await sendText(s.user, completionMessage);
-}
-
-/** ---- (Opsiyonel) Debug outbound ---- */
+/** ---- Debug outbound ---- */
 app.post("/send/text", async (req: Request, res: Response) => {
   try {
     const { to, body } = (req.body || {}) as { to?: string; body?: string };

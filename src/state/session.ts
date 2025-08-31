@@ -1,35 +1,24 @@
-export type PurposeId =
-  | "shift_start"
-  | "shift_end"
-  | "new_task_start"
-  | "task_finish"
-  | "issue_report";
-
 export type Step =
   | "idle"
   | "awaiting_location"
-  | "awaiting_purpose"
-  | "awaiting_task"
-  | "awaiting_note_decision"
-  | "awaiting_extra"
+  | "awaiting_description"
   | "completed";
 
 export interface Session {
   user: string;                // MSISDN (from)
+  workflowId: string;          // Unique workflow identifier
   step: Step;
-  media: Array<{ kind: "image" | "video"; id: string; caption?: string }>;
+  media: Array<{ type: "image" | "video"; id: string; caption?: string }>;
   location?: { lat?: number; lng?: number; name?: string; address?: string };
-  purpose?: PurposeId;
-  selectedTaskId?: string;     // "independent" olabilir
-  extraNote?: string;
-  extraAudio?: { id: string; mime_type?: string };
+  descriptions: Array<{
+    type: "text" | "audio";
+    content: string;           // Text content or audio ID
+    timestamp: number;
+  }>;
+  hasDescriptions: boolean;    // Track if at least one description received
+  lastActivityAt: number;      // For 2-minute timeout tracking
   createdAt: number;
   updatedAt: number;
-  
-  // Reply tracking fields
-  flowId: string;                                    // Unique flow identifier
-  messageIds: Set<string>;                           // Bu flow'daki tüm mesaj ID'leri
-  stateMessageMap: Map<string, Step>;                // MessageId -> State mapping
 }
 
 class SessionStore {
@@ -48,43 +37,35 @@ class SessionStore {
 
   set(phone: string, s: Session) {
     s.updatedAt = Date.now();
-    
-    // Message ID cleanup (max 50 mesaj sakla)
-    if (s.messageIds.size > 50) {
-      const idsArray = Array.from(s.messageIds);
-      const toKeep = idsArray.slice(-30); // Son 30'u koru
-      s.messageIds = new Set(toKeep);
-      
-      // StateMap'i de temizle
-      const validIds = new Set(toKeep);
-      for (const [id, _] of s.stateMessageMap) {
-        if (!validIds.has(id)) {
-          s.stateMessageMap.delete(id);
-        }
-      }
-    }
-    
+    s.lastActivityAt = Date.now();
     this.map.set(phone, s);
   }
 
   update(phone: string, patch: Partial<Session>) {
     const cur = this.get(phone);
-    const next = { ...(cur || this.new(phone)), ...patch, updatedAt: Date.now() };
+    const next = { 
+      ...(cur || this.new(phone)), 
+      ...patch, 
+      updatedAt: Date.now(),
+      lastActivityAt: Date.now()
+    };
     this.map.set(phone, next);
     return next;
   }
 
   new(phone: string): Session {
     const now = Date.now();
+    const workflowId = `wf_${now}_${phone.slice(-4)}`;
     const s: Session = {
       user: phone,
+      workflowId,
       step: "idle",
       media: [],
+      descriptions: [],
+      hasDescriptions: false,
+      lastActivityAt: now,
       createdAt: now,
       updatedAt: now,
-      flowId: `flow_${now}_${phone}`,
-      messageIds: new Set(),
-      stateMessageMap: new Map(),
     };
     this.map.set(phone, s);
     return s;
