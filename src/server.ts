@@ -420,8 +420,8 @@ async function cleanupInactiveSessions() {
   for (const [phone, session] of (sessions as any).map.entries()) {
     const idleTime = now - session.lastActivityAt;
     
-    // Only timeout active workflows, not idle sessions
-    if (session.step !== 'idle' && idleTime > timeoutMs) {
+    // Only timeout active workflows, not idle or completed sessions
+    if (session.step !== 'idle' && session.step !== 'completed' && idleTime > timeoutMs) {
       logger.warn({
         event: 'WORKFLOW_TIMEOUT',
         phone,
@@ -513,6 +513,17 @@ async function finalizeWorkflow(session: Session, triggerMessageId: string) {
     },
     timestamp: new Date().toISOString()
   }, `✅ WORKFLOW_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Descriptions: ${session.descriptions.length}`);
+  
+  // Clean up session after workflow completion to prevent stale state issues
+  sessions['map'].delete(session.user);
+  
+  logger.debug({
+    event: 'SESSION_CLEANUP',
+    phone: session.user,
+    workflowId: session.workflowId,
+    reason: 'workflow_completed',
+    timestamp: new Date().toISOString()
+  }, `🗑️ SESSION_CLEANUP: Phone: ${session.user} | Workflow: ${session.workflowId} | Reason: workflow completed`);
 }
 
 /** ---- Webhook (POST) ---- */
@@ -774,7 +785,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 }, `🏁 COMPLETION_TRIGGERED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Descriptions: ${s.descriptions.length}`);
                 
                 await finalizeWorkflow(s, mid);
-                transitionState(s, 'completed', 'user_completed', mid);
+                // Session is cleaned up in finalizeWorkflow, no need to transition to completed state
               } else {
                 logger.info({
                   event: 'INVALID_MESSAGE_DURING_DESCRIPTION',
