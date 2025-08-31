@@ -5,7 +5,7 @@ export type Step =
   | "completed";
 
 export interface Session {
-  user: string;                // MSISDN (from)
+  user: string;                // MSISDN (normalized)
   workflowId: string;          // Unique workflow identifier
   step: Step;
   media: Array<{ type: "image" | "video"; id: string; caption?: string }>;
@@ -21,43 +21,58 @@ export interface Session {
   updatedAt: number;
 }
 
+/** ---- Phone normalization for consistent session keys ---- */
+function normalizePhone(phone: string): string {
+  // Remove all non-digits and normalize format
+  // +905551234567 → 905551234567
+  // 905551234567 → 905551234567  
+  // 5551234567 → 5551234567
+  return phone.replace(/^\+/, '').replace(/[^\d]/g, '');
+}
+
 class SessionStore {
   private map = new Map<string, Session>();
   private ttlMs = 60 * 60 * 1000; // 1 saat
 
   get(phone: string): Session | undefined {
-    const s = this.map.get(phone);
+    const normalizedPhone = normalizePhone(phone);
+    const s = this.map.get(normalizedPhone);
     if (!s) return;
     if (Date.now() - s.updatedAt > this.ttlMs) {
-      this.map.delete(phone);
+      this.map.delete(normalizedPhone);
       return;
     }
     return s;
   }
 
   set(phone: string, s: Session) {
+    const normalizedPhone = normalizePhone(phone);
     s.updatedAt = Date.now();
     s.lastActivityAt = Date.now();
-    this.map.set(phone, s);
+    s.user = normalizedPhone; // Ensure user field is also normalized
+    this.map.set(normalizedPhone, s);
   }
 
   update(phone: string, patch: Partial<Session>) {
-    const cur = this.get(phone);
+    const normalizedPhone = normalizePhone(phone);
+    const cur = this.get(normalizedPhone);
     const next = { 
-      ...(cur || this.new(phone)), 
+      ...(cur || this.new(normalizedPhone)), 
       ...patch, 
       updatedAt: Date.now(),
-      lastActivityAt: Date.now()
+      lastActivityAt: Date.now(),
+      user: normalizedPhone // Ensure user field stays normalized
     };
-    this.map.set(phone, next);
+    this.map.set(normalizedPhone, next);
     return next;
   }
 
   new(phone: string): Session {
+    const normalizedPhone = normalizePhone(phone);
     const now = Date.now();
-    const workflowId = `wf_${now}_${phone.slice(-4)}`;
+    const workflowId = `wf_${now}_${normalizedPhone.slice(-4)}`;
     const s: Session = {
-      user: phone,
+      user: normalizedPhone,
       workflowId,
       step: "idle",
       media: [],
@@ -67,16 +82,18 @@ class SessionStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.map.set(phone, s);
+    this.map.set(normalizedPhone, s);
     return s;
   }
 
   complete(phone: string) {
-    const s = this.get(phone);
+    const normalizedPhone = normalizePhone(phone);
+    const s = this.get(normalizedPhone);
     if (!s) return;
     s.step = "completed";
     s.updatedAt = Date.now();
-    this.map.set(phone, s);
+    s.user = normalizedPhone; // Ensure user field stays normalized
+    this.map.set(normalizedPhone, s);
     // Otomatik temizleme da eklenebilir
   }
 }

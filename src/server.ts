@@ -371,6 +371,15 @@ async function forwardWithRetry(payload: AnyObject, maxAttempts = 5): Promise<vo
   }
 }
 
+/** ---- Phone normalization for consistent session keys ---- */
+function normalizePhone(phone: string): string {
+  // Remove all non-digits and normalize format
+  // +905551234567 → 905551234567
+  // 905551234567 → 905551234567  
+  // 5551234567 → 5551234567
+  return phone.replace(/^\+/, '').replace(/[^\d]/g, '');
+}
+
 /** ---- Message normalization ---- */
 function normalizeMessage(raw: WhatsAppMessage): NormalizedMessage {
   const ts = Number((raw as any).timestamp) * 1000 || Date.now();
@@ -575,17 +584,17 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           seen.set(mid);
 
           const msg = normalizeMessage(raw);
-          const from = msg.from;
+          const from = normalizePhone(msg.from);
           
           // DEBUG: Log phone number format for consistency checking
           logger.debug({
             event: 'PHONE_FORMAT_CHECK',
             originalFrom: msg.from,
-            from: from,
+            normalizedFrom: from,
             messageType: msg.type,
             messageId: mid,
             timestamp: new Date().toISOString()
-          }, `📱 PHONE_FORMAT_CHECK: Original: ${msg.from} | Used: ${from} | Type: ${msg.type} | MsgId: ${mid}`);
+          }, `📱 PHONE_FORMAT_CHECK: Original: ${msg.from} | Normalized: ${from} | Type: ${msg.type} | MsgId: ${mid}`);
           
           const contentPreview = msg.type === 'text' ? (msg as any).text : 
                                  msg.type === 'location' ? `lat:${(msg as any).location?.latitude}, lng:${(msg as any).location?.longitude}` :
