@@ -102,12 +102,24 @@ graph.interceptors.response.use(
 
 /** ---- Graph send helper ---- */
 async function graphSend(payload: AnyObject) {
-  const logPayload = {
+  const logPayload: any = {
     to: payload.to,
     type: payload.type,
     phone_number_id: WHATSAPP_PHONE_NUMBER_ID,
     payload_size: JSON.stringify(payload).length
   };
+  
+  // Add content details to outgoing message logs
+  if (payload.type === 'text') {
+    logPayload.textContent = (payload as any).text?.body;
+  } else if (payload.type === 'interactive') {
+    logPayload.interactiveData = {
+      type: (payload as any).interactive?.type,
+      body: (payload as any).interactive?.body?.text,
+      buttons: (payload as any).interactive?.action?.buttons,
+      sections: (payload as any).interactive?.action?.sections
+    };
+  }
   
   logger.debug(logPayload, `📤 Sending ${payload.type} message: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Size: ${logPayload.payload_size} bytes`);
 
@@ -117,12 +129,24 @@ async function graphSend(payload: AnyObject) {
       messaging_product: "whatsapp"
     });
     
-    logger.debug({ 
+    const sentLogData: any = { 
+      event: 'MESSAGE_SENT',
       messageId: data.messages?.[0]?.id,
       to: payload.to,
       type: payload.type,
-      status: 'sent'
-    }, `✅ Message sent successfully: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Type: ${payload.type} | ID: ${data.messages?.[0]?.id}`);
+      status: 'sent',
+      timestamp: new Date().toISOString()
+    };
+    
+    // Include content in sent message logs
+    if (payload.type === 'text') {
+      sentLogData.textContent = (payload as any).text?.body;
+    } else if (payload.type === 'interactive') {
+      sentLogData.interactiveContent = (payload as any).interactive?.body?.text;
+      sentLogData.interactiveType = (payload as any).interactive?.type;
+    }
+    
+    logger.info(sentLogData, `✅ Message sent successfully: bot(${WHATSAPP_PHONE_NUMBER_ID}) → user(${payload.to}) | Type: ${payload.type} | ID: ${data.messages?.[0]?.id}`);
     
     return data;
   } catch (error: any) {
@@ -396,7 +420,8 @@ async function cleanupInactiveSessions() {
   for (const [phone, session] of (sessions as any).map.entries()) {
     const idleTime = now - session.lastActivityAt;
     
-    if (idleTime > timeoutMs) {
+    // Only timeout active workflows, not idle sessions
+    if (session.step !== 'idle' && idleTime > timeoutMs) {
       logger.warn({
         event: 'WORKFLOW_TIMEOUT',
         phone,
@@ -543,14 +568,32 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             timestamp: new Date(msg.timestamp).toISOString()
           }, `💬 Received ${msg.type} message: user(${from}) → bot(${WHATSAPP_PHONE_NUMBER_ID}) | Content: "${contentPreview}" | MsgId: ${mid}`);
           
-          // Log message received
-          logger.info({
+          // Log message received with full content
+          const logData: any = {
             event: 'MESSAGE_RECEIVED',
             phone: from,
             messageId: mid,
             messageType: msg.type,
             timestamp: new Date().toISOString()
-          }, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
+          };
+          
+          // Add type-specific content to logs
+          if (msg.type === 'text') {
+            logData.textContent = (msg as any).text;
+          } else if (msg.type === 'location') {
+            logData.locationData = (msg as any).location;
+          } else if (msg.type === 'interactive') {
+            logData.interactiveData = (msg as any).interactive;
+          } else if (msg.type === 'image' || msg.type === 'video' || msg.type === 'audio' || msg.type === 'document') {
+            logData.mediaData = {
+              id: (msg as any).media?.id,
+              mime_type: (msg as any).media?.mime_type,
+              caption: (msg as any).media?.caption,
+              filename: (msg as any).media?.filename
+            };
+          }
+          
+          logger.info(logData, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type} | Content: "${contentPreview}"`);
           
           let s = sessions.get(from) || sessions.new(from);
 
