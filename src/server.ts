@@ -577,6 +577,16 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           const msg = normalizeMessage(raw);
           const from = msg.from;
           
+          // DEBUG: Log phone number format for consistency checking
+          logger.debug({
+            event: 'PHONE_FORMAT_CHECK',
+            originalFrom: msg.from,
+            from: from,
+            messageType: msg.type,
+            messageId: mid,
+            timestamp: new Date().toISOString()
+          }, `📱 PHONE_FORMAT_CHECK: Original: ${msg.from} | Used: ${from} | Type: ${msg.type} | MsgId: ${mid}`);
+          
           const contentPreview = msg.type === 'text' ? (msg as any).text : 
                                  msg.type === 'location' ? `lat:${(msg as any).location?.latitude}, lng:${(msg as any).location?.longitude}` :
                                  msg.type === 'interactive' ? (msg as any).interactive?.type :
@@ -676,14 +686,31 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           
           // For all other message types, session MUST exist
           const s = sessions.get(from);
+          
+          // DEBUG: Log session existence and all session keys
+          const allSessionKeys = Array.from((sessions as any).map.keys());
+          logger.debug({
+            event: 'SESSION_LOOKUP_DEBUG',
+            phone: from,
+            sessionExists: !!s,
+            sessionState: s?.step,
+            sessionWorkflowId: s?.workflowId,
+            allSessionKeys: allSessionKeys,
+            totalSessions: allSessionKeys.length,
+            messageType: msg.type,
+            messageId: mid,
+            timestamp: new Date().toISOString()
+          }, `🔍 SESSION_LOOKUP_DEBUG: Phone: ${from} | Exists: ${!!s} | State: ${s?.step || 'N/A'} | AllKeys: [${allSessionKeys.join(', ')}]`);
+          
           if (!s) {
             logger.warn({
               event: 'NO_ACTIVE_SESSION',
               phone: from,
               messageType: msg.type,
               messageId: mid,
+              allSessionKeys: allSessionKeys,
               timestamp: new Date().toISOString()
-            }, `❌ NO_ACTIVE_SESSION: Phone: ${from} | Message: ${mid} | Type: ${msg.type} - No active workflow`);
+            }, `❌ NO_ACTIVE_SESSION: Phone: ${from} | Message: ${mid} | Type: ${msg.type} - No active workflow | AllKeys: [${allSessionKeys.join(', ')}]`);
             
             await sendText(from, "📸 Başlamak için görsel veya video gönderin.");
             continue;

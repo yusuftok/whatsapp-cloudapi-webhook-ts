@@ -13,7 +13,8 @@
       "mcp__vercel__getDeployments",
       "Bash(vercel:*)",
       "Bash(npm run build:*)",
-      "mcp__vercel__getEnvVar"
+      "mcp__vercel__getEnvVar",
+      "Bash(npm run dev:*)"
     ],
     "deny": [],
     "ask": []
