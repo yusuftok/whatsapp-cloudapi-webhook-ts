@@ -261,7 +261,16 @@ function transitionState(
 }
 
 // Helper function to handle mid-flow image decision
-async function handleMidFlowImage(from: string, session: Session, messageId: string) {
+async function handleMidFlowImage(
+  from: string, 
+  session: Session, 
+  messageId: string,
+  mediaData: { type: "image" | "video"; id: string; caption?: string }
+) {
+  // Store media data temporarily for button handler
+  (session as any).pendingMedia = mediaData;
+  sessions.set(from, session);
+  
   if (session.hasDescriptions) {
     logger.info({
       event: 'MID_FLOW_MEDIA_DECISION',
@@ -270,8 +279,10 @@ async function handleMidFlowImage(from: string, session: Session, messageId: str
       messageId,
       currentState: session.step,
       descriptionsCount: session.descriptions.length,
+      mediaType: mediaData.type,
+      mediaId: mediaData.id,
       timestamp: new Date().toISOString()
-    }, `❓ MID_FLOW_MEDIA_DECISION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Descriptions: ${session.descriptions.length}`);
+    }, `❓ MID_FLOW_MEDIA_DECISION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Descriptions: ${session.descriptions.length} | Media: ${mediaData.type}`);
     
     return sendInteractiveButtons(from, 
       "Mevcut akışı kaydedip yeni akış başlatmak ister misiniz?",
@@ -286,8 +297,9 @@ async function handleMidFlowImage(from: string, session: Session, messageId: str
       phone: from,
       workflowId: session.workflowId,
       messageId,
+      mediaType: mediaData.type,
       timestamp: new Date().toISOString()
-    }, `❓ MID_FLOW_NO_DESCRIPTIONS: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId}`);
+    }, `❓ MID_FLOW_NO_DESCRIPTIONS: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Media: ${mediaData.type}`);
     
     return sendText(from, "Henüz açıklama yapmadınız. Lütfen sesli veya yazılı açıklama gönderin.");
   }
@@ -606,7 +618,76 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           
           logger.info(logData, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type} | Content: "${contentPreview}"`);
           
-          let s = sessions.get(from) || sessions.new(from);
+          // --- RESTRUCTURED MESSAGE HANDLING ---
+          
+          // Handle image/video FIRST (they can create/reset sessions)
+          if (msg.type === "image" || msg.type === "video") {
+            const mediaId = (msg as any).media?.id || (msg as any).image?.id || (msg as any).video?.id;
+            const mediaCaption = (msg as any).media?.caption || (msg as any).image?.caption || (msg as any).video?.caption;
+            
+            let s = sessions.get(from);
+            
+            // Handle mid-flow image/video
+            if (s && s.step === "awaiting_description") {
+              const mediaData = {
+                type: msg.type as "image" | "video",
+                id: mediaId,
+                caption: mediaCaption
+              };
+              
+              logger.info({
+                event: 'MID_FLOW_IMAGE_DETECTED',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                mediaType: msg.type,
+                currentState: s.step,
+                timestamp: new Date().toISOString()
+              }, `📸 MID_FLOW_IMAGE_DETECTED: Phone: ${from} | Workflow: ${s.workflowId} | State: ${s.step} | Media: ${msg.type}`);
+              
+              await handleMidFlowImage(from, s, mid, mediaData);
+              continue;
+            }
+            
+            // Start new workflow (create or reset session)
+            const oldWorkflowId = s?.workflowId || 'none';
+            const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
+            
+            logger.info({
+              event: 'WORKFLOW_START',
+              phone: from,
+              oldWorkflowId,
+              newWorkflowId,
+              messageId: mid,
+              previousState: s?.step || 'none',
+              reason: 'new_media',
+              mediaType: msg.type,
+              timestamp: new Date().toISOString()
+            }, `🔄 WORKFLOW_START: Phone: ${from} | Old: ${oldWorkflowId} | New: ${newWorkflowId} | Message: ${mid} | Media: ${msg.type}`);
+            
+            s = sessions.new(from);
+            s.workflowId = newWorkflowId;
+            s.media.push({type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption});
+            
+            transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
+            await requestLocation(from);
+            continue;
+          }
+          
+          // For all other message types, session MUST exist
+          const s = sessions.get(from);
+          if (!s) {
+            logger.warn({
+              event: 'NO_ACTIVE_SESSION',
+              phone: from,
+              messageType: msg.type,
+              messageId: mid,
+              timestamp: new Date().toISOString()
+            }, `❌ NO_ACTIVE_SESSION: Phone: ${from} | Message: ${mid} | Type: ${msg.type} - No active workflow`);
+            
+            await sendText(from, "📸 Başlamak için görsel veya video gönderin.");
+            continue;
+          }
           
           logger.debug({
             event: 'SESSION_STATE_CHECK',
@@ -617,79 +698,57 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             messageType: msg.type,
             timestamp: new Date().toISOString()
           }, `🔍 SESSION_STATE_CHECK: Phone: ${from} | State: ${s.step} | Workflow: ${s.workflowId} | MessageType: ${msg.type}`);
-
-          // --- SIMPLIFIED FSM ---
-          
-          // GLOBAL: Image/Video handler (resets FSM from any state)
-          if (msg.type === "image" || msg.type === "video") {
-            const mediaId = (msg as any).media?.id || (msg as any).image?.id || (msg as any).video?.id;
-            
-            // Handle mid-flow image/video
-            if (s.step === "awaiting_description") {
-              await handleMidFlowImage(from, s, mid);
-              continue;
-            }
-            
-            // Reset workflow
-            const oldWorkflowId = s.workflowId || 'none';
-            const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
-            
-            logger.info({
-              event: 'WORKFLOW_RESET',
-              phone: from,
-              oldWorkflowId,
-              newWorkflowId,
-              messageId: mid,
-              previousState: s.step,
-              reason: 'new_media',
-              timestamp: new Date().toISOString()
-            }, `🔄 WORKFLOW_RESET: Phone: ${from} | Old: ${oldWorkflowId} | New: ${newWorkflowId} | Message: ${mid}`);
-            
-            s = sessions.new(from);
-            s.workflowId = newWorkflowId;
-            s.media.push({type: msg.type as "image" | "video", id: mediaId});
-            
-            // Ensure session is properly saved before transition
-            sessions.set(from, s);
-            
-            transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
-            await requestLocation(from);
-            continue;
-          }
           
           // Handle mid-flow button decisions
           if (s.step === "awaiting_description" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
             const buttonId = (msg as any).interactive.button_reply.id;
             
             if (buttonId === "save_new") {
+              // Get the pending media that triggered this decision
+              const mediaData = (s as any).pendingMedia;
+              
               logger.info({
                 event: 'WORKFLOW_SAVE_AND_NEW',
                 phone: from,
                 workflowId: s.workflowId,
                 messageId: mid,
+                mediaType: mediaData?.type,
+                mediaId: mediaData?.id,
                 timestamp: new Date().toISOString()
-              }, `💾 WORKFLOW_SAVE_AND_NEW: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
+              }, `💾 WORKFLOW_SAVE_AND_NEW: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Media: ${mediaData?.type}`);
               
               // Finalize current workflow first
               await finalizeWorkflow(s, mid);
               
-              // Create new workflow
+              // Create new workflow WITH the triggering media
               const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
-              s = sessions.new(from);
-              s.workflowId = newWorkflowId;
+              const newSession = sessions.new(from);
+              newSession.workflowId = newWorkflowId;
               
-              await sendText(from, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni bir akışa başlıyoruz.");
-              await sendText(from, "📸 Yeni görsel veya video gönderin.");
+              // Add the image/video that triggered this decision!
+              if (mediaData) {
+                newSession.media.push(mediaData);
+              }
+              
+              await sendText(from, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni görsel için konum bilgisi gerekli.");
+              
+              // Transition to awaiting_location and request location (not another image!)
+              transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
+              await requestLocation(from);
               continue;
               
             } else if (buttonId === "continue") {
+              // Remove pending media and continue with current workflow
+              delete (s as any).pendingMedia;
+              sessions.set(from, s);
+              
               logger.info({
                 event: 'WORKFLOW_CONTINUE',
                 phone: from,
                 workflowId: s.workflowId,
                 messageId: mid,
                 timestamp: new Date().toISOString()
-              }, `▶️ WORKFLOW_CONTINUE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
+              }, `▶️ WORKFLOW_CONTINUE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} - Image ignored`);
               
               await sendText(from, "📝 Mevcut konuyu açıklamaya devam edin.");
               continue;
