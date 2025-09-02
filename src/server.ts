@@ -12,6 +12,10 @@ import {
   WhatsAppStatus,
 } from "./types/whatsapp";
 import { sessions, Session, Step } from "./state/session";
+import { transcribeBuffer } from "./stt/transcribe";
+import { extractMultipleFromText, extractFromText } from "./nlp/extract";
+import { fetchMediaUrl, downloadMediaBuffer } from "./services/waMedia";
+import { enqueueForHumanReview } from "./services/reviewQueue";
 
 dotenv.config();
 
@@ -472,19 +476,230 @@ async function cleanupInactiveSessions() {
 // Run cleanup every 30 seconds
 setInterval(cleanupInactiveSessions, 30000);
 
-/** ---- Workflow completion ---- */
-async function finalizeWorkflow(session: Session, triggerMessageId: string) {
-  const duration = Date.now() - session.createdAt;
+/** ---- Helper functions for description step ---- */
+
+// Process and concatenate all descriptions (text + audio transcription)
+async function processAndConcatenateDescriptions(session: Session): Promise<string> {
+  const processedDescriptions: string[] = [];
   
-  logger.info({
-    event: 'WORKFLOW_FINALIZATION_BEGIN',
-    phone: session.user,
-    workflowId: session.workflowId,
-    messageId: triggerMessageId,
-    timestamp: new Date().toISOString()
-  }, `🏁 WORKFLOW_FINALIZATION_BEGIN: Phone: ${session.user} | Workflow: ${session.workflowId} | Message: ${triggerMessageId}`);
-  
-  // Prepare and forward data
+  try {
+    for (const desc of session.descriptions) {
+      if (desc.type === 'text') {
+        processedDescriptions.push(desc.content);
+        logger.debug({
+          event: 'TEXT_DESCRIPTION_PROCESSED',
+          phone: session.user,
+          workflowId: session.workflowId,
+          content: desc.content.substring(0, 100) + '...',
+          timestamp: new Date().toISOString()
+        }, `📝 TEXT_DESCRIPTION_PROCESSED: Phone: ${session.user} | Content: ${desc.content.substring(0, 50)}...`);
+        
+      } else if (desc.type === 'audio') {
+        try {
+          logger.info({
+            event: 'AUDIO_TRANSCRIPTION_START',
+            phone: session.user,
+            workflowId: session.workflowId,
+            audioId: desc.content,
+            timestamp: new Date().toISOString()
+          }, `🎤 AUDIO_TRANSCRIPTION_START: Phone: ${session.user} | AudioID: ${desc.content}`);
+          
+          // Get audio media URL and download
+          const { url: audioUrl, mime } = await fetchMediaUrl(desc.content);
+          const audioBuffer = await downloadMediaBuffer(audioUrl);
+          
+          // Transcribe audio
+          const transcriptionResult = await transcribeBuffer(audioBuffer, "audio.ogg", mime || "audio/ogg");
+          processedDescriptions.push(transcriptionResult.text);
+          
+          logger.info({
+            event: 'AUDIO_TRANSCRIPTION_SUCCESS',
+            phone: session.user,
+            workflowId: session.workflowId,
+            audioId: desc.content,
+            transcribedText: transcriptionResult.text.substring(0, 100) + '...',
+            timestamp: new Date().toISOString()
+          }, `✅ AUDIO_TRANSCRIPTION_SUCCESS: Phone: ${session.user} | Text: ${transcriptionResult.text.substring(0, 50)}...`);
+          
+        } catch (error: any) {
+          logger.error({
+            event: 'AUDIO_TRANSCRIPTION_FAILED',
+            phone: session.user,
+            workflowId: session.workflowId,
+            audioId: desc.content,
+            error: error.message,
+            timestamp: new Date().toISOString()
+          }, `❌ AUDIO_TRANSCRIPTION_FAILED: Phone: ${session.user} | AudioID: ${desc.content} | Error: ${error.message}`);
+          
+          processedDescriptions.push(`[Ses kaydı transkript edilemedi: ${error.message}]`);
+        }
+      }
+    }
+    
+    const concatenated = processedDescriptions.join(' | ');
+    
+    logger.info({
+      event: 'DESCRIPTIONS_CONCATENATED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      totalDescriptions: session.descriptions.length,
+      concatenatedLength: concatenated.length,
+      preview: concatenated.substring(0, 200) + '...',
+      timestamp: new Date().toISOString()
+    }, `📋 DESCRIPTIONS_CONCATENATED: Phone: ${session.user} | Total: ${session.descriptions.length} | Length: ${concatenated.length}`);
+    
+    return concatenated;
+    
+  } catch (error: any) {
+    logger.error({
+      event: 'DESCRIPTION_PROCESSING_FAILED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }, `❌ DESCRIPTION_PROCESSING_FAILED: Phone: ${session.user} | Error: ${error.message}`);
+    
+    return "Açıklama işlenirken hata oluştu.";
+  }
+}
+
+// Extract work items from concatenated text
+async function extractWorkItemsFromText(session: Session, concatenatedDescription: string): Promise<any> {
+  try {
+    logger.info({
+      event: 'EXTRACTION_START',
+      phone: session.user,
+      workflowId: session.workflowId,
+      textLength: concatenatedDescription.length,
+      timestamp: new Date().toISOString()
+    }, `🔍 EXTRACTION_START: Phone: ${session.user} | TextLength: ${concatenatedDescription.length}`);
+    
+    const extractionResult = await extractMultipleFromText(concatenatedDescription);
+    
+    logger.info({
+      event: 'EXTRACTION_SUCCESS',
+      phone: session.user,
+      workflowId: session.workflowId,
+      extractionsCount: extractionResult.extractions.length,
+      overallSummary: extractionResult.overall_summary,
+      timestamp: new Date().toISOString()
+    }, `✅ EXTRACTION_SUCCESS: Phone: ${session.user} | Extractions: ${extractionResult.extractions.length} | Summary: ${extractionResult.overall_summary}`);
+    
+    return extractionResult;
+    
+  } catch (error: any) {
+    logger.error({
+      event: 'EXTRACTION_FAILED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }, `❌ EXTRACTION_FAILED: Phone: ${session.user} | Error: ${error.message}`);
+    
+    // Fallback extraction result
+    return {
+      extractions: [{
+        intent: "durum_guncelleme" as const,
+        intent_confidence: 0.5,
+        aciklama: concatenatedDescription,
+        evidence_spans: ["extraction failed"],
+        timing: {},
+        errors: [error.message]
+      }],
+      overall_summary: concatenatedDescription,
+      processing_notes: [`Extraction failed: ${error.message}`]
+    };
+  }
+}
+
+// Send extraction results to user via WhatsApp
+async function sendExtractionResultsToUser(session: Session, concatenatedDescription: string, extractionResult: any): Promise<void> {
+  try {
+    // Message 1: Concatenated description
+    await sendText(session.user, 
+      `📝 *Birleştirilmiş Açıklamanız:*\n\n${concatenatedDescription}`
+    );
+    
+    // Message 2: Overall summary if exists
+    if (extractionResult.overall_summary) {
+      await sendText(session.user, 
+        `📊 *Genel Özet:* ${extractionResult.overall_summary}`
+      );
+    }
+    
+    // Messages 3+: Each extraction as separate message
+    for (let i = 0; i < extractionResult.extractions.length; i++) {
+      const extraction = extractionResult.extractions[i] as any;
+      
+      if (!extraction) continue;
+      
+      let extractionMessage = `🔍 *İş Kalemi ${i + 1}:*\n\n`;
+      extractionMessage += `• *Niyet:* ${extraction.intent}\n`;
+      
+      if (extraction.is_kalemi_adi) {
+        extractionMessage += `• *İş Kalemi:* ${extraction.is_kalemi_adi}\n`;
+      }
+      if (extraction.is_kalemi_kodu) {
+        extractionMessage += `• *Kod:* ${extraction.is_kalemi_kodu}\n`;
+      }
+      if (extraction.blok) {
+        extractionMessage += `• *Blok:* ${extraction.blok}\n`;
+      }
+      if (extraction.daire_no) {
+        extractionMessage += `• *Daire:* ${extraction.daire_no}\n`;
+      }
+      if (extraction.kat) {
+        extractionMessage += `• *Kat:* ${extraction.kat}\n`;
+      }
+      if (extraction.alan) {
+        extractionMessage += `• *Alan:* ${extraction.alan}\n`;
+      }
+      if (extraction.aciklama) {
+        extractionMessage += `• *Açıklama:* ${extraction.aciklama}\n`;
+      }
+      
+      extractionMessage += `• *Güven:* %${Math.round((extraction.intent_confidence || 0) * 100)}`;
+      
+      if (extraction.errors && extraction.errors.length > 0) {
+        extractionMessage += `\n• *Uyarılar:* ${extraction.errors.join(', ')}`;
+      }
+      
+      await sendText(session.user, extractionMessage);
+      
+      // Rate limiting between messages
+      if (i < extractionResult.extractions.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    const totalMessages = 1 + (extractionResult.overall_summary ? 1 : 0) + extractionResult.extractions.length;
+    
+    logger.info({
+      event: 'MESSAGES_SENT_TO_USER',
+      phone: session.user,
+      workflowId: session.workflowId,
+      messageCount: totalMessages,
+      extractionsCount: extractionResult.extractions.length,
+      hasSummary: !!extractionResult.overall_summary,
+      timestamp: new Date().toISOString()
+    }, `📤 MESSAGES_SENT_TO_USER: Phone: ${session.user} | Messages: ${totalMessages} | Extractions: ${extractionResult.extractions.length}`);
+    
+  } catch (error: any) {
+    logger.error({
+      event: 'MESSAGE_SENDING_FAILED',
+      phone: session.user,
+      workflowId: session.workflowId,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }, `❌ MESSAGE_SENDING_FAILED: Phone: ${session.user} | Error: ${error.message}`);
+    
+    // Fallback message
+    await sendText(session.user, "✅ Teşekkürler, açıklamanız alındı ve işlendi.");
+  }
+}
+
+// Forward workflow data to external system
+async function forwardWorkflowData(session: Session, concatenatedDescription: string, extractionResult: any, duration: number): Promise<void> {
   const payload = {
     kind: "workflow_complete",
     workflowId: session.workflowId,
@@ -492,6 +707,8 @@ async function finalizeWorkflow(session: Session, triggerMessageId: string) {
     location: session.location,
     media: session.media,
     descriptions: session.descriptions,
+    concatenated_description: concatenatedDescription,
+    extraction_result: extractionResult,
     workflow_start: session.createdAt,
     workflow_end: Date.now(),
     duration
@@ -518,11 +735,35 @@ async function finalizeWorkflow(session: Session, triggerMessageId: string) {
       timestamp: new Date().toISOString()
     }, `❌ WORKFLOW_FORWARD_FAILED: Phone: ${session.user} | Workflow: ${session.workflowId} | Error: ${error.message}`);
   }
-  
-  await sendText(session.user, "✅ Teşekkürler, açıklamanız alındı ve kaydedildi.");
+}
+
+/** ---- Description step completion ---- */
+async function finalizeDescriptionStep(session: Session, triggerMessageId: string) {
+  const duration = Date.now() - session.createdAt;
   
   logger.info({
-    event: 'WORKFLOW_COMPLETE',
+    event: 'DESCRIPTION_STEP_FINALIZATION_BEGIN',
+    phone: session.user,
+    workflowId: session.workflowId,
+    messageId: triggerMessageId,
+    timestamp: new Date().toISOString()
+  }, `🏁 DESCRIPTION_STEP_FINALIZATION_BEGIN: Phone: ${session.user} | Workflow: ${session.workflowId} | Message: ${triggerMessageId}`);
+  
+  // Step 1: Process and concatenate descriptions
+  const concatenatedDescription = await processAndConcatenateDescriptions(session);
+  
+  // Step 2: Extract work items from text
+  const extractionResult = await extractWorkItemsFromText(session, concatenatedDescription);
+  
+  // Step 3: Send results to user
+  await sendExtractionResultsToUser(session, concatenatedDescription, extractionResult);
+  
+  // Step 4: Forward data to external system
+  await forwardWorkflowData(session, concatenatedDescription, extractionResult, duration);
+  
+  // Step 5: Complete and cleanup
+  logger.info({
+    event: 'DESCRIPTION_STEP_COMPLETE',
     phone: session.user,
     workflowId: session.workflowId,
     messageId: triggerMessageId,
@@ -531,21 +772,23 @@ async function finalizeWorkflow(session: Session, triggerMessageId: string) {
       mediaCount: session.media.length,
       descriptionsCount: session.descriptions.length,
       textDescriptions: session.descriptions.filter(d => d.type === 'text').length,
-      audioDescriptions: session.descriptions.filter(d => d.type === 'audio').length
+      audioDescriptions: session.descriptions.filter(d => d.type === 'audio').length,
+      extractionsCount: extractionResult?.extractions?.length || 0,
+      concatenatedDescriptionLength: concatenatedDescription.length
     },
     timestamp: new Date().toISOString()
-  }, `✅ WORKFLOW_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Descriptions: ${session.descriptions.length}`);
+  }, `✅ DESCRIPTION_STEP_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Extractions: ${extractionResult?.extractions?.length || 0}`);
   
-  // Clean up session after workflow completion to prevent stale state issues
+  // Clean up session
   sessions['map'].delete(session.user);
   
   logger.debug({
     event: 'SESSION_CLEANUP',
     phone: session.user,
     workflowId: session.workflowId,
-    reason: 'workflow_completed',
+    reason: 'description_step_completed',
     timestamp: new Date().toISOString()
-  }, `🗑️ SESSION_CLEANUP: Phone: ${session.user} | Workflow: ${session.workflowId} | Reason: workflow completed`);
+  }, `🗑️ SESSION_CLEANUP: Phone: ${session.user} | Workflow: ${session.workflowId} | Reason: description step completed`);
 }
 
 /** ---- Webhook (POST) ---- */
@@ -787,7 +1030,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               }, `💾 WORKFLOW_SAVE_AND_NEW: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Media: ${mediaData?.type}`);
               
               // Finalize current workflow first
-              await finalizeWorkflow(s, mid);
+              await finalizeDescriptionStep(s, mid);
               
               // Create new workflow WITH the triggering media
               const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
@@ -912,7 +1155,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   timestamp: new Date().toISOString()
                 }, `🏁 COMPLETION_TRIGGERED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Descriptions: ${s.descriptions.length}`);
                 
-                await finalizeWorkflow(s, mid);
+                await finalizeDescriptionStep(s, mid);
                 // Session is cleaned up in finalizeWorkflow, no need to transition to completed state
               } else {
                 logger.info({
