@@ -2,6 +2,7 @@
 import { openai, LLM_MODEL } from "../config/openai";
 import { EXTRACTION_JSON_SCHEMA, MULTIPLE_EXTRACTIONS_JSON_SCHEMA, Extraction, MultipleExtractions } from "./schema";
 import { TAXONOMY } from "../data/taxonomy";
+import { logOpenAIError, formatOpenAIErrorMessage } from "../utils/openaiErrors";
 
 const SYSTEM = `Sen bir şantiye kayıt asistanısın. Görevlerin:\n1) Konuşmadan NIYET (intent) tespit et: mesai başlangıcı/bitisi, iş kalemi başlangıcı/bitisi, sorun bildirimi, durum güncelleme, malzeme talebi, bilgi talebi.\n2) Metinde iş kalemi geçiyorsa, verilen TAKSONOMİDEN en yakın koda ve ada eşle.\n3) Lokasyon bilgisini yakala: blok, daire, kat, alan (daire, balkon, ortak alan, sosyal tesis, otopark, hizmetli odası, teknik alan, güvenlik, sığınak ...).\n4) Kararlarını destekleyen metin parçalarını evidence_spans'ta listele.\n5) Emin olamadığın noktalarda düşük confidence ver, errors'a not düş.`;
 
@@ -187,70 +188,136 @@ const FEW_SHOTS: Array<{user: string; assistant: Extraction}> = [
 ];
 
 export async function extractFromText(transcript: string): Promise<Extraction> {
-  const messages: any[] = [
-    { role: "system", content: SYSTEM },
-    {
-      role: "user",
-      content: `Taksonomi JSON'u:\n${JSON.stringify(TAXONOMY).slice(0, 4000)}\n\nGörev: Aşağıdaki metinden yapılandırılmış çıkarım üret.`
+  try {
+    const messages: any[] = [
+      { role: "system", content: SYSTEM },
+      {
+        role: "user",
+        content: `Taksonomi JSON'u:\n${JSON.stringify(TAXONOMY)}\n\nGörev: Aşağıdaki metinden yapılandırılmış çıkarım üret.`
+      }
+    ];
+
+    for (const ex of FEW_SHOTS) {
+      messages.push({ role: "user", content: ex.user });
+      messages.push({ role: "assistant", content: JSON.stringify(ex.assistant) });
     }
-  ];
+    messages.push({ role: "user", content: transcript });
 
-  for (const ex of FEW_SHOTS) {
-    messages.push({ role: "user", content: ex.user });
-    messages.push({ role: "assistant", content: JSON.stringify(ex.assistant) });
+    const resp = await openai.chat.completions.create({
+      model: LLM_MODEL,
+      messages: messages,
+      temperature: 0.2,
+      top_p: 0.95,
+      max_tokens: 600,
+      response_format: { 
+        type: "json_schema", 
+        json_schema: EXTRACTION_JSON_SCHEMA 
+      }
+    });
+
+    // Validate response structure
+    if (!resp) {
+      throw new Error("Invalid API response: response is null or undefined");
+    }
+    
+    if (!resp.choices || !Array.isArray(resp.choices) || resp.choices.length === 0) {
+      throw new Error("Invalid API response: no choices returned");
+    }
+
+    const choice = resp.choices[0];
+    if (!choice || !choice.message) {
+      throw new Error("Invalid API response: no message in choice");
+    }
+
+    const parsed = choice.message.content ? JSON.parse(choice.message.content) : null;
+    
+    if (!parsed) {
+      throw new Error("LLM JSON parse failed - no parsed content or valid JSON");
+    }
+    
+    return parsed as Extraction;
+
+  } catch (error: any) {
+    // Log detailed error information
+    logOpenAIError('TEXT_EXTRACTION', error, {
+      transcriptLength: transcript.length,
+      transcriptPreview: transcript.substring(0, 100) + '...',
+      model: LLM_MODEL,
+      function: 'extractFromText'
+    });
+
+    // Create user-friendly error message
+    const userMessage = formatOpenAIErrorMessage(error);
+    
+    // Throw error with detailed message
+    throw new Error(`${userMessage} (Original: ${error.message})`);
   }
-  messages.push({ role: "user", content: transcript });
-
-  const resp = await openai.responses.create({
-    model: LLM_MODEL,
-    reasoning: { effort: "low" },
-    input: messages,
-    temperature: 0.2,
-    top_p: 0.95,
-    max_output_tokens: 600,
-    response_format: { type: "json_schema", json_schema: EXTRACTION_JSON_SCHEMA }
-  } as any);
-
-  const toolOut = (resp as any).output?.[0]?.content?.[0]?.text
-    ?? (resp as any).output_text
-    ?? JSON.stringify((resp as any), null, 2);
-
-  let parsed: Extraction;
-  try { parsed = JSON.parse(toolOut); } catch { throw new Error("LLM JSON parse failed") }
-  return parsed;
 }
 
 // Birden fazla iş kalemi için extraction fonksiyonu
 export async function extractMultipleFromText(transcript: string): Promise<MultipleExtractions> {
-  const messages: any[] = [
-    { role: "system", content: MULTIPLE_SYSTEM },
-    {
-      role: "user",
-      content: `Taksonomi JSON'u:\n${JSON.stringify(TAXONOMY).slice(0, 4000)}\n\nGörev: Aşağıdaki metinden birden fazla iş kalemi için yapılandırılmış çıkarım üret.`
+  try {
+    const messages: any[] = [
+      { role: "system", content: MULTIPLE_SYSTEM },
+      {
+        role: "user",
+        content: `Taksonomi JSON'u:\n${JSON.stringify(TAXONOMY)}\n\nGörev: Aşağıdaki metinden birden fazla iş kalemi için yapılandırılmış çıkarım üret.`
+      }
+    ];
+
+    for (const ex of MULTIPLE_FEW_SHOTS) {
+      messages.push({ role: "user", content: ex.user });
+      messages.push({ role: "assistant", content: JSON.stringify(ex.assistant) });
     }
-  ];
+    messages.push({ role: "user", content: transcript });
 
-  for (const ex of MULTIPLE_FEW_SHOTS) {
-    messages.push({ role: "user", content: ex.user });
-    messages.push({ role: "assistant", content: JSON.stringify(ex.assistant) });
+    const resp = await openai.chat.completions.create({
+      model: LLM_MODEL,
+      messages: messages,
+      temperature: 0.2,
+      top_p: 0.95,
+      max_tokens: 1200,
+      response_format: { 
+        type: "json_schema", 
+        json_schema: MULTIPLE_EXTRACTIONS_JSON_SCHEMA 
+      }
+    });
+
+    // Validate response structure
+    if (!resp) {
+      throw new Error("Invalid API response: response is null or undefined");
+    }
+    
+    if (!resp.choices || !Array.isArray(resp.choices) || resp.choices.length === 0) {
+      throw new Error("Invalid API response: no choices returned");
+    }
+
+    const choice = resp.choices[0];
+    if (!choice || !choice.message) {
+      throw new Error("Invalid API response: no message in choice");
+    }
+
+    const parsed = choice.message.content ? JSON.parse(choice.message.content) : null;
+    
+    if (!parsed) {
+      throw new Error("LLM JSON parse failed for multiple extractions - no parsed content or valid JSON");
+    }
+    
+    return parsed as MultipleExtractions;
+
+  } catch (error: any) {
+    // Log detailed error information
+    logOpenAIError('MULTIPLE_TEXT_EXTRACTION', error, {
+      transcriptLength: transcript.length,
+      transcriptPreview: transcript.substring(0, 100) + '...',
+      model: LLM_MODEL,
+      function: 'extractMultipleFromText'
+    });
+
+    // Create user-friendly error message
+    const userMessage = formatOpenAIErrorMessage(error);
+    
+    // Throw error with detailed message
+    throw new Error(`${userMessage} (Original: ${error.message})`);
   }
-  messages.push({ role: "user", content: transcript });
-
-  const resp = await openai.responses.create({
-    model: LLM_MODEL,
-    reasoning: { effort: "medium" },
-    input: messages,
-    temperature: 0.2,
-    top_p: 0.95,
-    max_output_tokens: 1200,
-    response_format: { type: "json_schema", json_schema: MULTIPLE_EXTRACTIONS_JSON_SCHEMA }
-  } as any);
-
-  const toolOut = (resp as any).output?.[0]?.content?.[0]?.text
-    ?? (resp as any).output_text
-    ?? JSON.stringify((resp as any), null, 2);
-
-  let parsed: MultipleExtractions;
-  try { parsed = JSON.parse(toolOut); } catch { throw new Error("LLM JSON parse failed for multiple extractions") }
-  return parsed;
 }

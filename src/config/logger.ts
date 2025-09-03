@@ -30,7 +30,7 @@ export const logger = pino({
             target: "pino-pretty", 
             options: { 
               colorize: true,
-              translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
+              translateTime: 'SYS:yyyy-mm-dd HH:MM:ss o',
               levelFirst: true,
               ignore: 'pid,hostname',
               messageFormat: '{msg}',
@@ -43,7 +43,7 @@ export const logger = pino({
             options: { 
               destination: "./debug.log",
               colorize: false,
-              translateTime: 'TR:yyyy-mm-dd HH:MM:ss',
+              translateTime: 'SYS:yyyy-mm-dd HH:MM:ss o',
               levelFirst: true,
               ignore: 'pid,hostname',
               customLevels: 'info:30,debug:20,warn:40,error:50,fatal:60'

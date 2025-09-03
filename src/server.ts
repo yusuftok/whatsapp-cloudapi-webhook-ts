@@ -1,6 +1,9 @@
+// Load environment variables FIRST before any other imports
+import dotenv from "dotenv";
+dotenv.config();
+
 import express, { Request, Response } from "express";
 import crypto from "crypto";
-import dotenv from "dotenv";
 import axios, { AxiosInstance } from "axios";
 import { logger } from "./config/logger";
 import { TTLCache } from "./utils/cache";
@@ -16,8 +19,6 @@ import { transcribeBuffer } from "./stt/transcribe";
 import { extractMultipleFromText, extractFromText } from "./nlp/extract";
 import { fetchMediaUrl, downloadMediaBuffer } from "./services/waMedia";
 import { enqueueForHumanReview } from "./services/reviewQueue";
-
-dotenv.config();
 
 /** ---- Env ---- */
 const {
@@ -426,6 +427,27 @@ function normalizeMessage(raw: WhatsAppMessage): NormalizedMessage {
 /** ---- Health endpoints + Webhook verify ---- */
 app.get("/healthz", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 app.get("/readyz", (_req, res) => res.status(200).json({ ready: true }));
+
+// Test OpenAI API key
+app.get("/test-openai", async (_req, res) => {
+  try {
+    const { openai } = await import("./config/openai");
+    const result = await openai.models.list();
+    res.json({ 
+      success: true, 
+      hasApiKey: !!process.env.OPENAI_API_KEY,
+      keyPrefix: process.env.OPENAI_API_KEY?.substring(0, 10) + "...",
+      modelsCount: result.data.length 
+    });
+  } catch (error: any) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      hasApiKey: !!process.env.OPENAI_API_KEY,
+      keyPrefix: process.env.OPENAI_API_KEY?.substring(0, 10) + "..."
+    });
+  }
+});
 app.get("/whatsapp/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -522,16 +544,39 @@ async function processAndConcatenateDescriptions(session: Session): Promise<stri
           }, `✅ AUDIO_TRANSCRIPTION_SUCCESS: Phone: ${session.user} | Text: ${transcriptionResult.text.substring(0, 50)}...`);
           
         } catch (error: any) {
+          // Determine error source and log detailed information
+          const errorSource = error.message?.includes('fetch') || error.message?.includes('download') 
+            ? 'WHATSAPP_MEDIA' 
+            : 'OPENAI_TRANSCRIPTION';
+          
           logger.error({
             event: 'AUDIO_TRANSCRIPTION_FAILED',
+            errorSource,
             phone: session.user,
             workflowId: session.workflowId,
             audioId: desc.content,
-            error: error.message,
+            error: {
+              message: error.message,
+              status: error.response?.status || error.status,
+              statusText: error.response?.statusText,
+              data: error.response?.data,
+              code: error.code,
+              stack: error.stack
+            },
             timestamp: new Date().toISOString()
-          }, `❌ AUDIO_TRANSCRIPTION_FAILED: Phone: ${session.user} | AudioID: ${desc.content} | Error: ${error.message}`);
+          }, `❌ AUDIO_TRANSCRIPTION_FAILED [${errorSource}]: Phone: ${session.user} | AudioID: ${desc.content} | Error: ${error.response?.status || ''} ${error.message}`);
           
-          processedDescriptions.push(`[Ses kaydı transkript edilemedi: ${error.message}]`);
+          // Provide more specific error message to user
+          let userErrorMsg = 'Ses kaydı transkript edilemedi';
+          if (error.response?.status === 401) {
+            userErrorMsg = 'Ses kaydı transkript edilemedi: Kimlik doğrulama hatası';
+          } else if (error.response?.status === 404) {
+            userErrorMsg = 'Ses kaydı transkript edilemedi: Media bulunamadı';
+          } else if (error.response?.status === 429) {
+            userErrorMsg = 'Ses kaydı transkript edilemedi: Rate limit aşıldı';
+          }
+          
+          processedDescriptions.push(`[${userErrorMsg}]`);
         }
       }
     }

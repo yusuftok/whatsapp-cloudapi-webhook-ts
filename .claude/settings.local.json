@@ -14,7 +14,13 @@
       "Bash(vercel:*)",
       "Bash(npm run build:*)",
       "mcp__vercel__getEnvVar",
-      "Bash(npm run dev:*)"
+      "Bash(npm run dev:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "WebFetch(domain:platform.openai.com)",
+      "Bash(npm view:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(node:*)"
     ],
     "deny": [],
     "ask": []
