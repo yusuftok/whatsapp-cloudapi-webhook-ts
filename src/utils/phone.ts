@@ -3,6 +3,9 @@ export function normalizePhone(raw: string): string {
   if (!raw) return "";
   // Remove leading + and any non-digit characters
   const digits = raw.replace(/^\+/, "").replace(/[^\d]/g, "");
-  // Use last 10 digits to collapse country/leading zeros differences
-  return digits.slice(-10);
+  if (!digits) return "";
+
+  const lastDigits = digits.slice(-10);
+  // Pad with leading zeros if the remaining digits are shorter than 10
+  return lastDigits.padStart(10, "0");
 }
