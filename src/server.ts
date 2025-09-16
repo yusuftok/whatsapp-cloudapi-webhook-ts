@@ -653,6 +653,23 @@ async function extractWorkItemsFromText(session: Session, concatenatedDescriptio
 async function sendExtractionResultsToUser(session: Session, concatenatedDescription: string, extractionResult: any): Promise<void> {
   try {
     const recipient = session.rawUser || session.user;
+
+    // Determine extraction count
+    const extractions = Array.isArray(extractionResult.extractions) ? extractionResult.extractions : [];
+
+    if (extractions.length === 0) {
+      await sendText(recipient, "⚠️ Mesajınızdan anlamlı bilgi çıkaramadık. Lütfen daha açıklayıcı bir şekilde bildirimde bulunun.");
+
+      logger.info({
+        event: 'NO_EXTRACTIONS_NOTICE_SENT',
+        phone: session.user,
+        workflowId: session.workflowId,
+        timestamp: new Date().toISOString()
+      }, `⚠️ NO_EXTRACTIONS_NOTICE_SENT: Phone: ${session.user} | Workflow: ${session.workflowId}`);
+
+      return;
+    }
+
     // Message 1: Concatenated description
     await sendText(recipient, 
       `📝 *Birleştirilmiş Açıklamanız:*\n\n${concatenatedDescription}`
@@ -666,8 +683,8 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
     }
     
     // Messages 3+: Each extraction as separate message
-    for (let i = 0; i < extractionResult.extractions.length; i++) {
-      const extraction = extractionResult.extractions[i] as any;
+    for (let i = 0; i < extractions.length; i++) {
+      const extraction = extractions[i] as any;
       
       if (!extraction) continue;
       
@@ -705,22 +722,22 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
       await sendText(recipient, extractionMessage);
       
       // Rate limiting between messages
-      if (i < extractionResult.extractions.length - 1) {
+      if (i < extractions.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
     
-    const totalMessages = 1 + (extractionResult.overall_summary ? 1 : 0) + extractionResult.extractions.length;
+    const totalMessages = 1 + (extractionResult.overall_summary ? 1 : 0) + extractions.length;
     
     logger.info({
       event: 'MESSAGES_SENT_TO_USER',
       phone: session.user,
       workflowId: session.workflowId,
       messageCount: totalMessages,
-      extractionsCount: extractionResult.extractions.length,
+      extractionsCount: extractions.length,
       hasSummary: !!extractionResult.overall_summary,
       timestamp: new Date().toISOString()
-    }, `📤 MESSAGES_SENT_TO_USER: Phone: ${session.user} | Messages: ${totalMessages} | Extractions: ${extractionResult.extractions.length}`);
+    }, `📤 MESSAGES_SENT_TO_USER: Phone: ${session.user} | Messages: ${totalMessages} | Extractions: ${extractions.length}`);
     
   } catch (error: any) {
     logger.error({
