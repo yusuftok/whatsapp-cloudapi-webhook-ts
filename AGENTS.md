@@ -44,8 +44,8 @@ This is a TypeScript-based webhook server for WhatsApp Cloud API that implements
 
 ### Core Flow Architecture
 The system manages a streamlined conversation flow where users:
-1. Send media (image/video) → triggers workflow start
-2. Share location → identify where the media was captured
+1. Share location → conversation starts and geo context captured
+2. Send media (image/video) → provide visual evidence for the location
 3. Provide one or more descriptions via text or audio → capture contextual details
 4. Confirm completion via interactive button → triggers processing and forwarding
 5. (Optional) Send another media item mid-flow → user can choose to start a new workflow or continue the current one
@@ -53,7 +53,7 @@ The system manages a streamlined conversation flow where users:
 ### Key Components
 
 **State Management (`src/state/session.ts`)**
-- Session-based FSM with 3 states: idle, awaiting_location, awaiting_description
+- Session-based FSM with 4 states: idle, awaiting_location, awaiting_media, awaiting_description
 - TTL-cache-backed session storage (1 hour expiry)
 - Tracks both normalized (key) and last-seen raw phone format for replies
 - Phone numbers normalized to last 10 digits for consistent per-user tracking

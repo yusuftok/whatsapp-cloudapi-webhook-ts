@@ -1,7 +1,7 @@
 import { TTLCache } from "../utils/cache";
 import { normalizePhone } from "../utils/phone";
 
-export type Step = "idle" | "awaiting_location" | "awaiting_description";
+export type Step = "idle" | "awaiting_location" | "awaiting_media" | "awaiting_description";
 
 export interface Session {
   user: string;                // MSISDN (normalized)
@@ -35,7 +35,7 @@ class SessionStore {
       user: normalizedPhone,
       rawUser: rawPhone,
       workflowId: `wf_${now}_${normalizedPhone.slice(-4)}`,
-      step: "idle",
+      step: "awaiting_location",
       media: [],
       descriptions: [],
       hasDescriptions: false,

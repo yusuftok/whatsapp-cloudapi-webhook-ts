@@ -921,138 +921,158 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           logger.info(logData, `📨 MESSAGE_RECEIVED: Phone: ${from} | Message: ${mid} | Type: ${msg.type} | Content: "${contentPreview}"`);
           
           // --- RESTRUCTURED MESSAGE HANDLING ---
-          
-          // Handle image/video FIRST (they can create/reset sessions)
-          if (msg.type === "image" || msg.type === "video") {
-            const mediaId = (msg as any).media?.id || (msg as any).image?.id || (msg as any).video?.id;
-            const mediaCaption = (msg as any).media?.caption || (msg as any).image?.caption || (msg as any).video?.caption;
-            
-            let s = sessions.get(from);
-            
-            // Handle mid-flow image/video
-            if (s && s.step === "awaiting_description") {
-              const mediaData = {
-                type: msg.type as "image" | "video",
-                id: mediaId,
-                caption: mediaCaption
-              };
-              
-              logger.info({
-                event: 'MID_FLOW_IMAGE_DETECTED',
-                phone: from,
-                workflowId: s.workflowId,
-                messageId: mid,
-                mediaType: msg.type,
-                currentState: s.step,
-                timestamp: new Date().toISOString()
-              }, `📸 MID_FLOW_IMAGE_DETECTED: Phone: ${from} | Workflow: ${s.workflowId} | State: ${s.step} | Media: ${msg.type}`);
-              
-              await handleMidFlowImage(from, s, mid, mediaData);
-              continue;
-            }
-            
-            // Start new workflow (create or reset session)
-            const oldWorkflowId = s?.workflowId || 'none';
-            const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
-            
-            logger.info({
-              event: 'WORKFLOW_START',
-              phone: from,
-              oldWorkflowId,
-              newWorkflowId,
-              messageId: mid,
-              previousState: s?.step || 'none',
-              reason: 'new_media',
-              mediaType: msg.type,
-              timestamp: new Date().toISOString()
-            }, `🔄 WORKFLOW_START: Phone: ${from} | Old: ${oldWorkflowId} | New: ${newWorkflowId} | Message: ${mid} | Media: ${msg.type}`);
-            
-            s = sessions.new(from, rawFrom);
-            s.workflowId = newWorkflowId;
-            s.media.push({type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption});
-            
-            // DEBUG: Verify session was created and saved
-            const verifyBeforeTransition = sessions.get(from);
-            const sessionKeysBefore = sessions.keys();
-            logger.debug({
-              event: 'SESSION_CREATED_VERIFICATION',
-              phone: from,
-              normalizedPhone: normalizePhone(from),
-              sessionExists: !!verifyBeforeTransition,
-              sessionState: verifyBeforeTransition?.step,
-              sessionWorkflowId: verifyBeforeTransition?.workflowId,
-              expectedWorkflowId: newWorkflowId,
-              allKeys: sessionKeysBefore,
-              timestamp: new Date().toISOString()
-            }, `📍 SESSION_CREATED_VERIFICATION: Phone: ${from} | Exists: ${!!verifyBeforeTransition} | State: ${verifyBeforeTransition?.step} | Keys: [${sessionKeysBefore.join(', ')}]`);
-            
-            // Update session with new data
-            sessions.set(from, s, rawFrom);
 
-            transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
-            
-            // DEBUG: Verify session after transition
-            const verifyAfterTransition = sessions.get(from);
-            const sessionKeysAfter = sessions.keys();
-            logger.debug({
-              event: 'SESSION_AFTER_TRANSITION',
-              phone: from,
-              normalizedPhone: normalizePhone(from),
-              sessionExists: !!verifyAfterTransition,
-              sessionState: verifyAfterTransition?.step,
-              sessionWorkflowId: verifyAfterTransition?.workflowId,
-              hasMedia: verifyAfterTransition?.media?.length || 0,
-              allKeys: sessionKeysAfter,
-              timestamp: new Date().toISOString()
-            }, `✅ SESSION_AFTER_TRANSITION: Phone: ${from} | Exists: ${!!verifyAfterTransition} | State: ${verifyAfterTransition?.step} | Media: ${verifyAfterTransition?.media?.length || 0} | Keys: [${sessionKeysAfter.join(', ')}]`);
-            
-            await requestLocation(s.rawUser || rawFrom);
+          let session = sessions.get(from);
+          let replyTo = session?.rawUser || rawFrom;
+
+          // 1) Handle location first (starts or updates workflows)
+          if (msg.type === "location") {
+            const locationPayload = (msg as any).location || {};
+
+            if (!session) {
+              session = sessions.new(from, rawFrom);
+              replyTo = session.rawUser;
+            } else if (!session.rawUser) {
+              session.rawUser = rawFrom;
+            }
+
+            session.location = locationPayload;
+            sessions.set(from, session, replyTo);
+
+            if (session.step === "awaiting_location" || session.step === "idle") {
+              const nextState: Step = session.media.length > 0 ? 'awaiting_description' : 'awaiting_media';
+              logger.info({
+                event: 'LOCATION_RECEIVED',
+                phone: from,
+                workflowId: session.workflowId,
+                messageId: mid,
+                location: {
+                  lat: locationPayload?.latitude,
+                  lng: locationPayload?.longitude,
+                  name: locationPayload?.name
+                },
+                timestamp: new Date().toISOString()
+              }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
+
+              transitionState(session, nextState, 'location_received', mid);
+              if (nextState === 'awaiting_media') {
+                await sendText(replyTo, "📸 Konum alındı. Lütfen görsel veya video gönderin.");
+              } else {
+                await sendText(replyTo, "🎤 Konum alındı. Lütfen sesli veya yazılı açıklama yapın.");
+              }
+            } else if (session.step === "awaiting_media") {
+              logger.info({
+                event: 'LOCATION_UPDATED_BEFORE_MEDIA',
+                phone: from,
+                workflowId: session.workflowId,
+                messageId: mid,
+                timestamp: new Date().toISOString()
+              }, `📍 LOCATION_UPDATED_BEFORE_MEDIA: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
+
+              await sendText(replyTo, "📍 Konum güncellendi. Şimdi lütfen görsel veya video gönderin.");
+            } else if (session.step === "awaiting_description") {
+              logger.info({
+                event: 'LOCATION_UPDATED_DURING_DESCRIPTION',
+                phone: from,
+                workflowId: session.workflowId,
+                messageId: mid,
+                timestamp: new Date().toISOString()
+              }, `📍 LOCATION_UPDATED_DURING_DESCRIPTION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
+
+              await sendText(replyTo, "📍 Konum güncellendi. Açıklamalarınıza devam edin veya hazırsanız Tamam'a basın.");
+            }
+
             continue;
           }
-          
-          // For all other message types, session MUST exist
-          const s = sessions.get(from);
 
-          // DEBUG: Log session existence and all session keys
+          // Reload session (location handler may have created it)
+          session = sessions.get(from);
+          replyTo = session?.rawUser || rawFrom;
+
+          // 2) If no active session yet, instruct to share location
           const allSessionKeys = sessions.keys();
-          logger.debug({
-            event: 'SESSION_LOOKUP_DEBUG',
-            phone: from,
-            sessionExists: !!s,
-            sessionState: s?.step,
-            sessionWorkflowId: s?.workflowId,
-            allSessionKeys: allSessionKeys,
-            totalSessions: allSessionKeys.length,
-            messageType: msg.type,
-            messageId: mid,
-            timestamp: new Date().toISOString()
-          }, `🔍 SESSION_LOOKUP_DEBUG: Phone: ${from} | Exists: ${!!s} | State: ${s?.step || 'N/A'} | AllKeys: [${allSessionKeys.join(', ')}]`);
-          
-          if (!s) {
+          if (!session) {
             logger.warn({
               event: 'NO_ACTIVE_SESSION',
               phone: from,
               messageType: msg.type,
               messageId: mid,
-              allSessionKeys: allSessionKeys,
+              allSessionKeys,
               timestamp: new Date().toISOString()
             }, `❌ NO_ACTIVE_SESSION: Phone: ${from} | Message: ${mid} | Type: ${msg.type} - No active workflow | AllKeys: [${allSessionKeys.join(', ')}]`);
-            
-            await sendText(rawFrom, "📸 Başlamak için görsel veya video gönderin.");
+
+            await requestLocation(rawFrom);
             continue;
           }
 
           logger.debug({
             event: 'SESSION_STATE_CHECK',
             phone: from,
-            workflowId: s.workflowId,
-            currentState: s.step,
+            workflowId: session.workflowId,
+            currentState: session.step,
             messageId: mid,
             messageType: msg.type,
             timestamp: new Date().toISOString()
-          }, `🔍 SESSION_STATE_CHECK: Phone: ${from} | State: ${s.step} | Workflow: ${s.workflowId} | MessageType: ${msg.type}`);
+          }, `🔍 SESSION_STATE_CHECK: Phone: ${from} | State: ${session.step} | Workflow: ${session.workflowId} | MessageType: ${msg.type}`);
 
-          const replyTo = s.rawUser || rawFrom;
+          // 3) Handle media based on current state
+          if (msg.type === "image" || msg.type === "video") {
+            const mediaId = (msg as any).media?.id || (msg as any).image?.id || (msg as any).video?.id;
+            const mediaCaption = (msg as any).media?.caption || (msg as any).image?.caption || (msg as any).video?.caption;
+
+            if (session.step === "awaiting_media") {
+              session.media.push({ type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption });
+              sessions.set(from, session, replyTo);
+
+              logger.info({
+                event: 'MEDIA_RECEIVED',
+                phone: from,
+                workflowId: session.workflowId,
+                messageId: mid,
+                mediaType: msg.type,
+                timestamp: new Date().toISOString()
+              }, `📸 MEDIA_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid} | Media: ${msg.type}`);
+
+              transitionState(session, 'awaiting_description', `${msg.type}_received`, mid);
+              await sendText(replyTo, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
+              continue;
+            }
+
+            if (session.step === "awaiting_description") {
+              const mediaData = {
+                type: msg.type as "image" | "video",
+                id: mediaId,
+                caption: mediaCaption
+              };
+
+              logger.info({
+                event: 'MID_FLOW_IMAGE_DETECTED',
+                phone: from,
+                workflowId: session.workflowId,
+                messageId: mid,
+                mediaType: msg.type,
+                currentState: session.step,
+                timestamp: new Date().toISOString()
+              }, `📸 MID_FLOW_IMAGE_DETECTED: Phone: ${from} | Workflow: ${session.workflowId} | State: ${session.step} | Media: ${msg.type}`);
+
+              await handleMidFlowImage(from, session, mid, mediaData);
+              continue;
+            }
+
+            logger.info({
+              event: 'MEDIA_BEFORE_LOCATION',
+              phone: from,
+              workflowId: session.workflowId,
+              messageId: mid,
+              currentState: session.step,
+              timestamp: new Date().toISOString()
+            }, `⚠️ MEDIA_BEFORE_LOCATION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid} | State: ${session.step}`);
+
+            await sendText(replyTo, "📍 Önce konumunuzu paylaşın.");
+            continue;
+          }
+
+          const s = session;
 
           // Handle mid-flow button decisions
           if (s.step === "awaiting_description" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
@@ -1085,7 +1105,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 newSession.media.push(mediaData);
               }
 
-              await sendText(s.rawUser || rawFrom, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni görsel için konum bilgisi gerekli.");
+              await sendText(s.rawUser || rawFrom, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni akış için lütfen konumunuzu paylaşın.");
 
               // Transition to awaiting_location and request location (not another image!)
               transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
@@ -1113,51 +1133,30 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           // State-specific handlers
           switch(s.step) {
             case 'idle':
-              if (msg.type !== 'image' && msg.type !== 'video') {
-                logger.info({
-                  event: 'IDLE_NON_MEDIA_MESSAGE',
-                  phone: from,
-                  messageId: mid,
-                  messageType: msg.type,
-                  timestamp: new Date().toISOString()
-                }, `💤 IDLE_NON_MEDIA_MESSAGE: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
-
-                await sendText(replyTo, "📸 Başlamak için görsel veya video gönderin.");
-              }
-              break;
-              
             case 'awaiting_location':
-              if (msg.type === 'location') {
-                logger.info({
-                  event: 'LOCATION_RECEIVED',
-                  phone: from,
-                  workflowId: s.workflowId,
-                  messageId: mid,
-                  location: {
-                    lat: (msg as any).location?.latitude,
-                    lng: (msg as any).location?.longitude,
-                    name: (msg as any).location?.name
-                  },
-                  timestamp: new Date().toISOString()
-                }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
-                
-                s.location = (msg as any).location;
-                transitionState(s, 'awaiting_description', 'location_received', mid);
-                await sendText(replyTo, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
-              } else {
-                logger.info({
-                  event: 'INVALID_MESSAGE_TYPE',
-                  phone: from,
-                  workflowId: s.workflowId,
-                  messageId: mid,
-                  expectedType: 'location',
-                  receivedType: msg.type,
-                  currentState: s.step,
-                  timestamp: new Date().toISOString()
-                }, `⚠️ INVALID_MESSAGE_TYPE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Expected: location | Got: ${msg.type}`);
-                
-                await requestLocation(replyTo);
-              }
+              logger.info({
+                event: 'AWAITING_LOCATION_PROMPT',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                messageType: msg.type,
+                timestamp: new Date().toISOString()
+              }, `💤 AWAITING_LOCATION_PROMPT: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
+
+              await requestLocation(replyTo);
+              break;
+
+            case 'awaiting_media':
+              logger.info({
+                event: 'AWAITING_MEDIA_PROMPT',
+                phone: from,
+                workflowId: s.workflowId,
+                messageId: mid,
+                messageType: msg.type,
+                timestamp: new Date().toISOString()
+              }, `📸 AWAITING_MEDIA_PROMPT: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
+
+              await sendText(replyTo, "📸 Konumdan sonra lütfen görsel veya video gönderin.");
               break;
 
             case 'awaiting_description':
@@ -1212,7 +1211,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 
                 await sendText(replyTo, 
                   "💬 Lütfen sesli veya yazılı açıklama yapın.\n\n" +
-                  "🔄 Yeniden başlamak için görsel/video gönderin."
+                  "🔄 Yeni bir akış için konumunuzu paylaşarak başlayın."
                 );
               }
               break;
