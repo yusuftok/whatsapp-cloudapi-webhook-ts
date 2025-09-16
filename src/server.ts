@@ -205,7 +205,7 @@ async function requestLocation(to: string) {
         type: "interactive",
         interactive: {
           type: "location_request_message",
-          body: { text: "Lütfen mevcut konumunuzu paylaşın." },
+          body: { text: "Yeni bir bildirimde bulunmak için lütfen mevcut konumunuzu paylaşarak başlayın." },
           action: { name: "send_location" },
         },
       });
