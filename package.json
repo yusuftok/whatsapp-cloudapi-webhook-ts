@@ -6,6 +6,7 @@
     "scripts": {
         "dev": "NODE_ENV=development LOG_LEVEL=debug tsx watch src/server.ts",
         "build": "tsc",
+        "test": "tsx tests/phone.test.ts",
         "start": "node dist/server.js",
         "vercel-build": "npm run build"
     },
