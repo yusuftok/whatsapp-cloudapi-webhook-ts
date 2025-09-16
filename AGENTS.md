@@ -55,6 +55,7 @@ The system manages a streamlined conversation flow where users:
 **State Management (`src/state/session.ts`)**
 - Session-based FSM with 3 states: idle, awaiting_location, awaiting_description
 - TTL-cache-backed session storage (1 hour expiry)
+- Tracks both normalized (key) and last-seen raw phone format for replies
 - Phone numbers normalized to last 10 digits for consistent per-user tracking
 - 2-minute inactivity cleanup for active workflows
 

@@ -5,6 +5,7 @@ export type Step = "idle" | "awaiting_location" | "awaiting_description";
 
 export interface Session {
   user: string;                // MSISDN (normalized)
+  rawUser: string;             // Last seen raw phone format from WhatsApp
   workflowId: string;          // Unique workflow identifier
   step: Step;
   media: Array<{ type: "image" | "video"; id: string; caption?: string }>;
@@ -28,10 +29,11 @@ class SessionStore {
     this.store = new TTLCache<Session>(limit, this.ttlMs);
   }
 
-  private createSession(normalizedPhone: string): Session {
+  private createSession(normalizedPhone: string, rawPhone: string): Session {
     const now = Date.now();
     return {
       user: normalizedPhone,
+      rawUser: rawPhone,
       workflowId: `wf_${now}_${normalizedPhone.slice(-4)}`,
       step: "idle",
       media: [],
@@ -45,27 +47,35 @@ class SessionStore {
 
   get(phone: string): Session | undefined {
     const normalizedPhone = normalizePhone(phone);
-    return this.store.get(normalizedPhone);
+    const session = this.store.get(normalizedPhone);
+    if (session) {
+      // Ensure rawUser always has at least normalized fallback
+      session.rawUser = session.rawUser || normalizedPhone;
+    }
+    return session;
   }
 
-  set(phone: string, session: Session): void {
+  set(phone: string, session: Session, rawPhone?: string): void {
     const normalizedPhone = normalizePhone(phone);
+    const raw = rawPhone ?? session.rawUser ?? phone;
     const now = Date.now();
     session.updatedAt = now;
     session.lastActivityAt = now;
     session.user = normalizedPhone;
+    session.rawUser = raw;
     this.store.set(normalizedPhone, session, this.ttlMs);
   }
 
-  update(phone: string, patch: Partial<Session>): Session {
+  update(phone: string, patch: Partial<Session>, rawPhone?: string): Session {
     const normalizedPhone = normalizePhone(phone);
     const existing = this.get(normalizedPhone);
-    const base = existing ?? this.createSession(normalizedPhone);
+    const base = existing ?? this.createSession(normalizedPhone, rawPhone ?? phone);
     const now = Date.now();
     const next: Session = {
       ...base,
       ...patch,
       user: normalizedPhone,
+      rawUser: rawPhone ?? patch.rawUser ?? base.rawUser ?? normalizedPhone,
       updatedAt: now,
       lastActivityAt: now,
     };
@@ -73,9 +83,10 @@ class SessionStore {
     return next;
   }
 
-  new(phone: string): Session {
+  new(phone: string, rawPhone?: string): Session {
     const normalizedPhone = normalizePhone(phone);
-    const session = this.createSession(normalizedPhone);
+    const raw = rawPhone ?? phone;
+    const session = this.createSession(normalizedPhone, raw);
     this.store.set(normalizedPhone, session, this.ttlMs);
     return session;
   }

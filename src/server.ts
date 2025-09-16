@@ -248,7 +248,7 @@ function transitionState(
   // Perform the actual state change
   session.step = newState;
   session.lastActivityAt = Date.now();
-  sessions.set(session.user, session);
+  sessions.set(session.user, session, session.rawUser);
   
   // LOG: STATE_TRANSITION_END
   logger.info({
@@ -273,9 +273,10 @@ async function handleMidFlowImage(
   messageId: string,
   mediaData: { type: "image" | "video"; id: string; caption?: string }
 ) {
+  const replyTo = session.rawUser || from;
   // Store media data temporarily for button handler
   (session as any).pendingMedia = mediaData;
-  sessions.set(from, session);
+  sessions.set(from, session, replyTo);
   
   if (session.hasDescriptions) {
     logger.info({
@@ -290,7 +291,7 @@ async function handleMidFlowImage(
       timestamp: new Date().toISOString()
     }, `❓ MID_FLOW_MEDIA_DECISION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Descriptions: ${session.descriptions.length} | Media: ${mediaData.type}`);
     
-    return sendInteractiveButtons(from, 
+    return sendInteractiveButtons(replyTo, 
       "Mevcut akışı kaydedip yeni akış başlatmak ister misiniz?",
       [
         {id: "save_new", title: "Evet"}, 
@@ -307,7 +308,7 @@ async function handleMidFlowImage(
       timestamp: new Date().toISOString()
     }, `❓ MID_FLOW_NO_DESCRIPTIONS: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Media: ${mediaData.type}`);
     
-    return sendText(from, "Henüz açıklama yapmadınız. Lütfen sesli veya yazılı açıklama gönderin.");
+    return sendText(replyTo, "Henüz açıklama yapmadınız. Lütfen sesli veya yazılı açıklama gönderin.");
   }
 }
 
@@ -651,14 +652,15 @@ async function extractWorkItemsFromText(session: Session, concatenatedDescriptio
 // Send extraction results to user via WhatsApp
 async function sendExtractionResultsToUser(session: Session, concatenatedDescription: string, extractionResult: any): Promise<void> {
   try {
+    const recipient = session.rawUser || session.user;
     // Message 1: Concatenated description
-    await sendText(session.user, 
+    await sendText(recipient, 
       `📝 *Birleştirilmiş Açıklamanız:*\n\n${concatenatedDescription}`
     );
     
     // Message 2: Overall summary if exists
     if (extractionResult.overall_summary) {
-      await sendText(session.user, 
+      await sendText(recipient, 
         `📊 *Genel Özet:* ${extractionResult.overall_summary}`
       );
     }
@@ -700,7 +702,7 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
         extractionMessage += `\n• *Uyarılar:* ${extraction.errors.join(', ')}`;
       }
       
-      await sendText(session.user, extractionMessage);
+      await sendText(recipient, extractionMessage);
       
       // Rate limiting between messages
       if (i < extractionResult.extractions.length - 1) {
@@ -730,7 +732,7 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
     }, `❌ MESSAGE_SENDING_FAILED: Phone: ${session.user} | Error: ${error.message}`);
     
     // Fallback message
-    await sendText(session.user, "✅ Teşekkürler, açıklamanız alındı ve işlendi.");
+    await sendText(session.rawUser || session.user, "✅ Teşekkürler, açıklamanız alındı ve işlendi.");
   }
 }
 
@@ -864,12 +866,13 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           seen.set(mid, true);
 
           const msg = normalizeMessage(raw);
-          const from = normalizePhone(msg.from);
+          const rawFrom = msg.from;
+          const from = normalizePhone(rawFrom);
           
           // DEBUG: Log phone number format for consistency checking
           logger.debug({
             event: 'PHONE_FORMAT_CHECK',
-            originalFrom: msg.from,
+            originalFrom: rawFrom,
             normalizedFrom: from,
             messageType: msg.type,
             messageId: mid,
@@ -964,7 +967,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               timestamp: new Date().toISOString()
             }, `🔄 WORKFLOW_START: Phone: ${from} | Old: ${oldWorkflowId} | New: ${newWorkflowId} | Message: ${mid} | Media: ${msg.type}`);
             
-            s = sessions.new(from);
+            s = sessions.new(from, rawFrom);
             s.workflowId = newWorkflowId;
             s.media.push({type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption});
             
@@ -984,8 +987,8 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             }, `📍 SESSION_CREATED_VERIFICATION: Phone: ${from} | Exists: ${!!verifyBeforeTransition} | State: ${verifyBeforeTransition?.step} | Keys: [${sessionKeysBefore.join(', ')}]`);
             
             // Update session with new data
-            sessions.set(from, s);
-            
+            sessions.set(from, s, rawFrom);
+
             transitionState(s, 'awaiting_location', `${msg.type}_received`, mid);
             
             // DEBUG: Verify session after transition
@@ -1003,13 +1006,13 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               timestamp: new Date().toISOString()
             }, `✅ SESSION_AFTER_TRANSITION: Phone: ${from} | Exists: ${!!verifyAfterTransition} | State: ${verifyAfterTransition?.step} | Media: ${verifyAfterTransition?.media?.length || 0} | Keys: [${sessionKeysAfter.join(', ')}]`);
             
-            await requestLocation(from);
+            await requestLocation(s.rawUser || rawFrom);
             continue;
           }
           
           // For all other message types, session MUST exist
           const s = sessions.get(from);
-          
+
           // DEBUG: Log session existence and all session keys
           const allSessionKeys = sessions.keys();
           logger.debug({
@@ -1035,10 +1038,10 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               timestamp: new Date().toISOString()
             }, `❌ NO_ACTIVE_SESSION: Phone: ${from} | Message: ${mid} | Type: ${msg.type} - No active workflow | AllKeys: [${allSessionKeys.join(', ')}]`);
             
-            await sendText(from, "📸 Başlamak için görsel veya video gönderin.");
+            await sendText(rawFrom, "📸 Başlamak için görsel veya video gönderin.");
             continue;
           }
-          
+
           logger.debug({
             event: 'SESSION_STATE_CHECK',
             phone: from,
@@ -1048,7 +1051,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             messageType: msg.type,
             timestamp: new Date().toISOString()
           }, `🔍 SESSION_STATE_CHECK: Phone: ${from} | State: ${s.step} | Workflow: ${s.workflowId} | MessageType: ${msg.type}`);
-          
+
+          const replyTo = s.rawUser || rawFrom;
+
           // Handle mid-flow button decisions
           if (s.step === "awaiting_description" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
             const buttonId = (msg as any).interactive.button_reply.id;
@@ -1072,26 +1077,26 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               
               // Create new workflow WITH the triggering media
               const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
-              const newSession = sessions.new(from);
+              const newSession = sessions.new(from, s.rawUser || rawFrom);
               newSession.workflowId = newWorkflowId;
-              
+
               // Add the image/video that triggered this decision!
               if (mediaData) {
                 newSession.media.push(mediaData);
               }
-              
-              await sendText(from, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni görsel için konum bilgisi gerekli.");
-              
+
+              await sendText(s.rawUser || rawFrom, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni görsel için konum bilgisi gerekli.");
+
               // Transition to awaiting_location and request location (not another image!)
               transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
-              await requestLocation(from);
+              await requestLocation(newSession.rawUser || s.rawUser || rawFrom);
               continue;
-              
+
             } else if (buttonId === "continue") {
               // Remove pending media and continue with current workflow
               delete (s as any).pendingMedia;
-              sessions.set(from, s);
-              
+              sessions.set(from, s, replyTo);
+
               logger.info({
                 event: 'WORKFLOW_CONTINUE',
                 phone: from,
@@ -1099,8 +1104,8 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 messageId: mid,
                 timestamp: new Date().toISOString()
               }, `▶️ WORKFLOW_CONTINUE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} - Image ignored`);
-              
-              await sendText(from, "📝 Mevcut konuyu açıklamaya devam edin.");
+
+              await sendText(replyTo, "📝 Mevcut konuyu açıklamaya devam edin.");
               continue;
             }
           }
@@ -1116,8 +1121,8 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   messageType: msg.type,
                   timestamp: new Date().toISOString()
                 }, `💤 IDLE_NON_MEDIA_MESSAGE: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
-                
-                await sendText(from, "📸 Başlamak için görsel veya video gönderin.");
+
+                await sendText(replyTo, "📸 Başlamak için görsel veya video gönderin.");
               }
               break;
               
@@ -1138,7 +1143,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 
                 s.location = (msg as any).location;
                 transitionState(s, 'awaiting_description', 'location_received', mid);
-                await sendText(from, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
+                await sendText(replyTo, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
               } else {
                 logger.info({
                   event: 'INVALID_MESSAGE_TYPE',
@@ -1151,10 +1156,10 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   timestamp: new Date().toISOString()
                 }, `⚠️ INVALID_MESSAGE_TYPE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Expected: location | Got: ${msg.type}`);
                 
-                await requestLocation(from);
+                await requestLocation(replyTo);
               }
               break;
-              
+
             case 'awaiting_description':
               if (msg.type === 'text' || msg.type === 'audio') {
                 const descriptionIndex = s.descriptions.length + 1;
@@ -1176,13 +1181,13 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   timestamp: Date.now()
                 });
                 s.hasDescriptions = true;
-                sessions.set(from, s);
-                
-                await sendInteractiveButtons(from, 
+                sessions.set(from, s, replyTo);
+
+                await sendInteractiveButtons(replyTo, 
                   "✅ Açıklamanız bittiyse Tamam'a basın.\n📝 Bitmediyse ses kaydı veya yazılı açıklama göndermeye devam edin.",
                   [{id: "complete", title: "Tamam"}]
                 );
-                
+
               } else if (msg.type === 'interactive' && (msg as any).interactive?.button_reply?.id === 'complete') {
                 logger.info({
                   event: 'COMPLETION_TRIGGERED',
@@ -1205,7 +1210,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   timestamp: new Date().toISOString()
                 }, `⚠️ INVALID_MESSAGE_DURING_DESCRIPTION: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Type: ${msg.type}`);
                 
-                await sendText(from, 
+                await sendText(replyTo, 
                   "💬 Lütfen sesli veya yazılı açıklama yapın.\n\n" +
                   "🔄 Yeniden başlamak için görsel/video gönderin."
                 );
