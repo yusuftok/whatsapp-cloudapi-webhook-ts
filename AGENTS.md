@@ -54,7 +54,7 @@ The system manages a streamlined conversation flow where users:
 
 **State Management (`src/state/session.ts`)**
 - Session-based FSM with 3 states: idle, awaiting_location, awaiting_description
-- TTL-based session storage (1 hour expiry)
+- TTL-cache-backed session storage (1 hour expiry)
 - Per-user conversation state tracking with 2-minute inactivity cleanup
 
 **Message Processing (`src/server.ts`)**
@@ -70,7 +70,7 @@ The system manages a streamlined conversation flow where users:
 - Status update handling
 
 **Utilities**
-- `TTLCache` for webhook/idempotency tracking
+- Shared `TTLCache` for webhook deduplication and session storage
 - Structured logging with Pino (Turkish timezone, pretty formatting in dev)
 - Graph API client with request/response interceptors
 

@@ -1,3 +1,5 @@
+import { TTLCache } from "../utils/cache";
+
 export type Step =
   | "idle"
   | "awaiting_location"
@@ -30,49 +32,18 @@ function normalizePhone(phone: string): string {
 }
 
 class SessionStore {
-  private map = new Map<string, Session>();
-  private ttlMs = 60 * 60 * 1000; // 1 saat
+  private readonly ttlMs = 60 * 60 * 1000; // 1 saat
+  private readonly store: TTLCache<Session>;
 
-  get(phone: string): Session | undefined {
-    const normalizedPhone = normalizePhone(phone);
-    const s = this.map.get(normalizedPhone);
-    if (!s) return;
-    if (Date.now() - s.updatedAt > this.ttlMs) {
-      this.map.delete(normalizedPhone);
-      return;
-    }
-    return s;
+  constructor(limit = 5000) {
+    this.store = new TTLCache<Session>(limit, this.ttlMs);
   }
 
-  set(phone: string, s: Session) {
-    const normalizedPhone = normalizePhone(phone);
-    s.updatedAt = Date.now();
-    s.lastActivityAt = Date.now();
-    s.user = normalizedPhone; // Ensure user field is also normalized
-    this.map.set(normalizedPhone, s);
-  }
-
-  update(phone: string, patch: Partial<Session>) {
-    const normalizedPhone = normalizePhone(phone);
-    const cur = this.get(normalizedPhone);
-    const next = { 
-      ...(cur || this.new(normalizedPhone)), 
-      ...patch, 
-      updatedAt: Date.now(),
-      lastActivityAt: Date.now(),
-      user: normalizedPhone // Ensure user field stays normalized
-    };
-    this.map.set(normalizedPhone, next);
-    return next;
-  }
-
-  new(phone: string): Session {
-    const normalizedPhone = normalizePhone(phone);
+  private createSession(normalizedPhone: string): Session {
     const now = Date.now();
-    const workflowId = `wf_${now}_${normalizedPhone.slice(-4)}`;
-    const s: Session = {
+    return {
       user: normalizedPhone,
-      workflowId,
+      workflowId: `wf_${now}_${normalizedPhone.slice(-4)}`,
       step: "idle",
       media: [],
       descriptions: [],
@@ -81,21 +52,60 @@ class SessionStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.map.set(normalizedPhone, s);
-    return s;
   }
 
-  delete(phone: string) {
+  get(phone: string): Session | undefined {
     const normalizedPhone = normalizePhone(phone);
-    return this.map.delete(normalizedPhone);
+    return this.store.get(normalizedPhone);
+  }
+
+  set(phone: string, session: Session): void {
+    const normalizedPhone = normalizePhone(phone);
+    const now = Date.now();
+    session.updatedAt = now;
+    session.lastActivityAt = now;
+    session.user = normalizedPhone;
+    this.store.set(normalizedPhone, session, this.ttlMs);
+  }
+
+  update(phone: string, patch: Partial<Session>): Session {
+    const normalizedPhone = normalizePhone(phone);
+    const existing = this.get(normalizedPhone);
+    const base = existing ?? this.createSession(normalizedPhone);
+    const now = Date.now();
+    const next: Session = {
+      ...base,
+      ...patch,
+      user: normalizedPhone,
+      updatedAt: now,
+      lastActivityAt: now,
+    };
+    this.store.set(normalizedPhone, next, this.ttlMs);
+    return next;
+  }
+
+  new(phone: string): Session {
+    const normalizedPhone = normalizePhone(phone);
+    const session = this.createSession(normalizedPhone);
+    this.store.set(normalizedPhone, session, this.ttlMs);
+    return session;
+  }
+
+  delete(phone: string): boolean {
+    const normalizedPhone = normalizePhone(phone);
+    return this.store.delete(normalizedPhone);
   }
 
   size(): number {
-    return this.map.size;
+    return this.store.size();
   }
 
   keys(): string[] {
-    return Array.from(this.map.keys());
+    return this.store.keys();
+  }
+
+  entries(): Array<[string, Session]> {
+    return this.store.entries();
   }
 }
 

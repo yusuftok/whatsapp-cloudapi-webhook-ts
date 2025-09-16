@@ -457,14 +457,14 @@ app.get("/whatsapp/webhook", (req, res) => {
 });
 
 /** ---- Idempotency ---- */
-const seen = new TTLCache();
+const seen = new TTLCache<boolean>();
 
 // 2-minute timeout cleanup
 async function cleanupInactiveSessions() {
   const now = Date.now();
   const timeoutMs = 120000; // 2 minutes
   
-  for (const [phone, session] of (sessions as any).map.entries()) {
+  for (const [phone, session] of sessions.entries()) {
     const idleTime = now - session.lastActivityAt;
     
     if (idleTime > timeoutMs) {
@@ -481,7 +481,7 @@ async function cleanupInactiveSessions() {
       
       // Don't send timeout message immediately - just cleanup session
       // User will get "send image/video" message naturally when they send next message
-      sessions['map'].delete(phone);
+      sessions.delete(phone);
       
       logger.info({
         event: 'SESSION_DELETED',
@@ -824,7 +824,7 @@ async function finalizeDescriptionStep(session: Session, triggerMessageId: strin
   }, `✅ DESCRIPTION_STEP_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Extractions: ${extractionResult?.extractions?.length || 0}`);
   
   // Clean up session
-  sessions['map'].delete(session.user);
+  sessions.delete(session.user);
   
   logger.debug({
     event: 'SESSION_CLEANUP',
@@ -861,7 +861,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           const sid = st.id ?? `${st.recipient_id}:${st.status}:${st.timestamp}`;
           if (seen.has(sid)) continue;
           logger.debug(`📊 Status update: ${st.status}`);
-          seen.set(sid);
+          seen.set(sid, true);
           await forwardWithRetry({ kind: "status", metadata: value.metadata, status: st } as AnyObject);
         }
 
@@ -869,7 +869,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
         for (const raw of value.messages ?? []) {
           const mid = (raw as any).id as string;
           if (!mid || seen.has(mid)) continue;
-          seen.set(mid);
+          seen.set(mid, true);
 
           const msg = normalizeMessage(raw);
           const from = normalizePhone(msg.from);
@@ -978,6 +978,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             
             // DEBUG: Verify session was created and saved
             const verifyBeforeTransition = sessions.get(from);
+            const sessionKeysBefore = sessions.keys();
             logger.debug({
               event: 'SESSION_CREATED_VERIFICATION',
               phone: from,
@@ -986,9 +987,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               sessionState: verifyBeforeTransition?.step,
               sessionWorkflowId: verifyBeforeTransition?.workflowId,
               expectedWorkflowId: newWorkflowId,
-              allKeys: Array.from((sessions as any).map.keys()),
+              allKeys: sessionKeysBefore,
               timestamp: new Date().toISOString()
-            }, `📍 SESSION_CREATED_VERIFICATION: Phone: ${from} | Exists: ${!!verifyBeforeTransition} | State: ${verifyBeforeTransition?.step} | Keys: [${Array.from((sessions as any).map.keys()).join(', ')}]`);
+            }, `📍 SESSION_CREATED_VERIFICATION: Phone: ${from} | Exists: ${!!verifyBeforeTransition} | State: ${verifyBeforeTransition?.step} | Keys: [${sessionKeysBefore.join(', ')}]`);
             
             // Update session with new data
             sessions.set(from, s);
@@ -997,6 +998,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             
             // DEBUG: Verify session after transition
             const verifyAfterTransition = sessions.get(from);
+            const sessionKeysAfter = sessions.keys();
             logger.debug({
               event: 'SESSION_AFTER_TRANSITION',
               phone: from,
@@ -1005,9 +1007,9 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               sessionState: verifyAfterTransition?.step,
               sessionWorkflowId: verifyAfterTransition?.workflowId,
               hasMedia: verifyAfterTransition?.media?.length || 0,
-              allKeys: Array.from((sessions as any).map.keys()),
+              allKeys: sessionKeysAfter,
               timestamp: new Date().toISOString()
-            }, `✅ SESSION_AFTER_TRANSITION: Phone: ${from} | Exists: ${!!verifyAfterTransition} | State: ${verifyAfterTransition?.step} | Media: ${verifyAfterTransition?.media?.length || 0} | Keys: [${Array.from((sessions as any).map.keys()).join(', ')}]`);
+            }, `✅ SESSION_AFTER_TRANSITION: Phone: ${from} | Exists: ${!!verifyAfterTransition} | State: ${verifyAfterTransition?.step} | Media: ${verifyAfterTransition?.media?.length || 0} | Keys: [${sessionKeysAfter.join(', ')}]`);
             
             await requestLocation(from);
             continue;
@@ -1017,7 +1019,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           const s = sessions.get(from);
           
           // DEBUG: Log session existence and all session keys
-          const allSessionKeys = Array.from((sessions as any).map.keys());
+          const allSessionKeys = sessions.keys();
           logger.debug({
             event: 'SESSION_LOOKUP_DEBUG',
             phone: from,
