@@ -467,8 +467,7 @@ async function cleanupInactiveSessions() {
   for (const [phone, session] of (sessions as any).map.entries()) {
     const idleTime = now - session.lastActivityAt;
     
-    // Only timeout active workflows, not idle or completed sessions
-    if (session.step !== 'idle' && session.step !== 'completed' && idleTime > timeoutMs) {
+    if (idleTime > timeoutMs) {
       logger.warn({
         event: 'WORKFLOW_TIMEOUT',
         phone,
@@ -1201,7 +1200,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 }, `🏁 COMPLETION_TRIGGERED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Descriptions: ${s.descriptions.length}`);
                 
                 await finalizeDescriptionStep(s, mid);
-                // Session is cleaned up in finalizeWorkflow, no need to transition to completed state
+                // Session is cleaned up in finalizeDescriptionStep; no completed state transition remains
               } else {
                 logger.info({
                   event: 'INVALID_MESSAGE_DURING_DESCRIPTION',
@@ -1219,18 +1218,6 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               }
               break;
             
-            case 'completed':
-              logger.info({
-                event: 'MESSAGE_AFTER_COMPLETION',
-                phone: from,
-                workflowId: s.workflowId,
-                messageId: mid,
-                messageType: msg.type,
-                timestamp: new Date().toISOString()
-              }, `✅ MESSAGE_AFTER_COMPLETION: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Type: ${msg.type}`);
-              
-              await sendText(from, "📸 Yeni bir bildirim için görsel veya video gönderin.");
-              break;
           }
           
           // Log message processing complete

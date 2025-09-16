@@ -1,8 +1,7 @@
 export type Step =
   | "idle"
   | "awaiting_location"
-  | "awaiting_description"
-  | "completed";
+  | "awaiting_description";
 
 export interface Session {
   user: string;                // MSISDN (normalized)
@@ -84,17 +83,6 @@ class SessionStore {
     };
     this.map.set(normalizedPhone, s);
     return s;
-  }
-
-  complete(phone: string) {
-    const normalizedPhone = normalizePhone(phone);
-    const s = this.get(normalizedPhone);
-    if (!s) return;
-    s.step = "completed";
-    s.updatedAt = Date.now();
-    s.user = normalizedPhone; // Ensure user field stays normalized
-    this.map.set(normalizedPhone, s);
-    // Otomatik temizleme da eklenebilir
   }
 
   delete(phone: string) {
