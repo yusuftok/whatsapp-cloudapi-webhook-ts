@@ -35,7 +35,7 @@ class SessionStore {
   private readonly ttlMs = 60 * 60 * 1000; // 1 saat
   private readonly store: TTLCache<Session>;
 
-  constructor(limit = 5000) {
+  constructor(limit = 50_000) {
     this.store = new TTLCache<Session>(limit, this.ttlMs);
   }
 

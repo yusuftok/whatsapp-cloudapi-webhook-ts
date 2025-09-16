@@ -3,7 +3,7 @@ export class TTLCache<V = unknown> {
   private readonly defaultTtlMs: number;
   private readonly map: Map<string, { value: V; expires: number }>;
 
-  constructor(limit = 5000, ttlMs = 6 * 60 * 60 * 1000) {
+  constructor(limit = 50_000, ttlMs = 6 * 60 * 60 * 1000) {
     this.limit = limit;
     this.defaultTtlMs = ttlMs;
     this.map = new Map();
