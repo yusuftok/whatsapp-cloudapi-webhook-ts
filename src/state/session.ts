@@ -1,9 +1,7 @@
 import { TTLCache } from "../utils/cache";
+import { normalizePhone } from "../utils/phone";
 
-export type Step =
-  | "idle"
-  | "awaiting_location"
-  | "awaiting_description";
+export type Step = "idle" | "awaiting_location" | "awaiting_description";
 
 export interface Session {
   user: string;                // MSISDN (normalized)
@@ -20,15 +18,6 @@ export interface Session {
   lastActivityAt: number;      // For 2-minute timeout tracking
   createdAt: number;
   updatedAt: number;
-}
-
-/** ---- Phone normalization for consistent session keys ---- */
-function normalizePhone(phone: string): string {
-  // Remove all non-digits and normalize format
-  // +905551234567 → 905551234567
-  // 905551234567 → 905551234567  
-  // 5551234567 → 5551234567
-  return phone.replace(/^\+/, '').replace(/[^\d]/g, '');
 }
 
 class SessionStore {

@@ -19,6 +19,7 @@ import { transcribeBuffer } from "./stt/transcribe";
 import { extractMultipleFromText, extractFromText } from "./nlp/extract";
 import { fetchMediaUrl, downloadMediaBuffer } from "./services/waMedia";
 import { enqueueForHumanReview } from "./services/reviewQueue";
+import { normalizePhone } from "./utils/phone";
 
 /** ---- Env ---- */
 const {
@@ -374,15 +375,6 @@ async function forwardWithRetry(payload: AnyObject, maxAttempts = 5): Promise<vo
       delay *= 2;
     }
   }
-}
-
-/** ---- Phone normalization for consistent session keys ---- */
-function normalizePhone(phone: string): string {
-  // Remove all non-digits and normalize format
-  // +905551234567 → 905551234567
-  // 905551234567 → 905551234567  
-  // 5551234567 → 5551234567
-  return phone.replace(/^\+/, '').replace(/[^\d]/g, '');
 }
 
 /** ---- Message normalization ---- */
