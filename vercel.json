@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "dist/server.js": {
-      "runtime": "nodejs22.x",
+      "runtime": "nodejs20.x",
       "maxDuration": 60
     }
   },
