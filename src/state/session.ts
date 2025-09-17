@@ -1,5 +1,6 @@
-import { TTLCache } from "../utils/cache";
 import { normalizePhone } from "../utils/phone";
+import { sessionAdapter, SESSION_TTL_SECONDS } from "./store";
+import { SessionStoreAdapter, SessionRecord } from "./store/SessionStore";
 
 export type Step = "idle" | "awaiting_location" | "awaiting_media" | "awaiting_description";
 
@@ -22,12 +23,10 @@ export interface Session {
 }
 
 class SessionStore {
-  private readonly ttlMs = 60 * 60 * 1000; // 1 saat
-  private readonly store: TTLCache<Session>;
-
-  constructor(limit = 50_000) {
-    this.store = new TTLCache<Session>(limit, this.ttlMs);
-  }
+  constructor(
+    private readonly adapter: SessionStoreAdapter,
+    private readonly ttlSeconds = SESSION_TTL_SECONDS
+  ) {}
 
   private createSession(normalizedPhone: string, rawPhone: string): Session {
     const now = Date.now();
@@ -45,30 +44,45 @@ class SessionStore {
     };
   }
 
-  get(phone: string): Session | undefined {
-    const normalizedPhone = normalizePhone(phone);
-    const session = this.store.get(normalizedPhone);
-    if (session) {
-      // Ensure rawUser always has at least normalized fallback
-      session.rawUser = session.rawUser || normalizedPhone;
-    }
-    return session;
+  private toRecord(session: Session): SessionRecord {
+    return {
+      ...session,
+      step: session.step,
+    };
   }
 
-  set(phone: string, session: Session, rawPhone?: string): void {
+  private fromRecord(record: SessionRecord): Session {
+    return {
+      ...record,
+      step: record.step as Step,
+    };
+  }
+
+  async get(phone: string): Promise<Session | undefined> {
+    const normalizedPhone = normalizePhone(phone);
+    const record = await this.adapter.get(normalizedPhone);
+    if (!record) return undefined;
+    record.rawUser = record.rawUser || normalizedPhone;
+    return this.fromRecord(record);
+  }
+
+  async set(phone: string, session: Session, rawPhone?: string): Promise<void> {
     const normalizedPhone = normalizePhone(phone);
     const raw = rawPhone ?? session.rawUser ?? phone;
     const now = Date.now();
-    session.updatedAt = now;
-    session.lastActivityAt = now;
-    session.user = normalizedPhone;
-    session.rawUser = raw;
-    this.store.set(normalizedPhone, session, this.ttlMs);
+    const next: Session = {
+      ...session,
+      user: normalizedPhone,
+      rawUser: raw,
+      updatedAt: now,
+      lastActivityAt: now,
+    };
+    await this.adapter.set(normalizedPhone, this.toRecord(next), this.ttlSeconds);
   }
 
-  update(phone: string, patch: Partial<Session>, rawPhone?: string): Session {
+  async update(phone: string, patch: Partial<Session>, rawPhone?: string): Promise<Session> {
     const normalizedPhone = normalizePhone(phone);
-    const existing = this.get(normalizedPhone);
+    const existing = await this.get(normalizedPhone);
     const base = existing ?? this.createSession(normalizedPhone, rawPhone ?? phone);
     const now = Date.now();
     const next: Session = {
@@ -79,34 +93,36 @@ class SessionStore {
       updatedAt: now,
       lastActivityAt: now,
     };
-    this.store.set(normalizedPhone, next, this.ttlMs);
+    await this.adapter.set(normalizedPhone, this.toRecord(next), this.ttlSeconds);
     return next;
   }
 
-  new(phone: string, rawPhone?: string): Session {
+  async new(phone: string, rawPhone?: string): Promise<Session> {
     const normalizedPhone = normalizePhone(phone);
     const raw = rawPhone ?? phone;
     const session = this.createSession(normalizedPhone, raw);
-    this.store.set(normalizedPhone, session, this.ttlMs);
+    await this.adapter.set(normalizedPhone, this.toRecord(session), this.ttlSeconds);
     return session;
   }
 
-  delete(phone: string): boolean {
+  async delete(phone: string): Promise<boolean> {
     const normalizedPhone = normalizePhone(phone);
-    return this.store.delete(normalizedPhone);
+    return this.adapter.delete(normalizedPhone);
   }
 
-  size(): number {
-    return this.store.size();
+  async size(): Promise<number> {
+    return this.adapter.size();
   }
 
-  keys(): string[] {
-    return this.store.keys();
+  async keys(): Promise<string[]> {
+    const entries = await this.adapter.entries();
+    return entries.map(([key]) => key);
   }
 
-  entries(): Array<[string, Session]> {
-    return this.store.entries();
+  async entries(): Promise<Array<[string, Session]>> {
+    const records = await this.adapter.entries();
+    return records.map(([key, record]) => [key, this.fromRecord(record)]);
   }
 }
 
-export const sessions = new SessionStore();
+export const sessions = new SessionStore(sessionAdapter);

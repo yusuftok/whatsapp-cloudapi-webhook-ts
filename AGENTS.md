@@ -54,7 +54,7 @@ The system manages a streamlined conversation flow where users:
 
 **State Management (`src/state/session.ts`)**
 - Session-based FSM with 4 states: idle, awaiting_location, awaiting_media, awaiting_description
-- TTL-cache-backed session storage (1 hour expiry)
+- Redis-backed session storage with in-memory fallback (1 hour expiry)
 - Tracks both normalized (key) and last-seen raw phone format for replies
 - Phone numbers normalized to last 10 digits for consistent per-user tracking
 - 2-minute inactivity cleanup for active workflows
@@ -88,6 +88,9 @@ Optional:
 - `FORWARD_AUTH_HEADER` - Authorization for forwarding
 - `WHATSAPP_ENABLE_LOCATION_REQUEST` - Native location request support
 - `LOG_LEVEL` - Logging verbosity (debug in dev)
+- `OPENAI_API_KEY` - Required for extraction pipeline
+- `REDIS_URL` - Upstash Redis connection string (falls back to in-memory if absent)
+- `SESSION_TTL_SECONDS`, `IDEMPOTENCY_TTL_SECONDS` - Override default TTLs if needed
 
 ### Interactive Message Patterns
 - **Buttons**: Workflow branching and completion confirmations (max 3 buttons)  

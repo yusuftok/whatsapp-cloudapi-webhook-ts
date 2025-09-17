@@ -6,7 +6,7 @@ import express, { Request, Response } from "express";
 import crypto from "crypto";
 import axios, { AxiosInstance } from "axios";
 import { logger } from "./config/logger";
-import { TTLCache } from "./utils/cache";
+import { seen as idempotencyCache } from "./utils/idempotencyCache";
 import {
   AnyObject,
   NormalizedMessage,
@@ -225,12 +225,12 @@ async function requestLocation(to: string) {
 }
 
 // Helper function for two-part state transition logging
-function transitionState(
+async function transitionState(
   session: Session, 
   newState: Step, 
   trigger: string, 
   messageId: string
-): Session {
+): Promise<Session> {
   const oldState = session.step;
   const transitionStartTime = Date.now();
   
@@ -248,7 +248,7 @@ function transitionState(
   // Perform the actual state change
   session.step = newState;
   session.lastActivityAt = Date.now();
-  sessions.set(session.user, session, session.rawUser);
+  await sessions.set(session.user, session, session.rawUser);
   
   // LOG: STATE_TRANSITION_END
   logger.info({
@@ -276,7 +276,7 @@ async function handleMidFlowImage(
   const replyTo = session.rawUser || from;
   // Store media data temporarily for button handler
   (session as any).pendingMedia = mediaData;
-  sessions.set(from, session, replyTo);
+  await sessions.set(from, session, replyTo);
   
   if (session.hasDescriptions) {
     logger.info({
@@ -450,14 +450,14 @@ app.get("/whatsapp/webhook", (req, res) => {
 });
 
 /** ---- Idempotency ---- */
-const seen = new TTLCache<boolean>();
 
 // 2-minute timeout cleanup
 async function cleanupInactiveSessions() {
   const now = Date.now();
   const timeoutMs = 120000; // 2 minutes
   
-  for (const [phone, session] of sessions.entries()) {
+  const entries = await sessions.entries();
+  for (const [phone, session] of entries) {
     const idleTime = now - session.lastActivityAt;
     
     if (idleTime > timeoutMs) {
@@ -474,7 +474,7 @@ async function cleanupInactiveSessions() {
       
       // Don't send timeout message immediately - just cleanup session
       // User will get "send image/video" message naturally when they send next message
-      sessions.delete(phone);
+      await sessions.delete(phone);
       
       logger.info({
         event: 'SESSION_DELETED',
@@ -488,7 +488,11 @@ async function cleanupInactiveSessions() {
 }
 
 // Run cleanup every 30 seconds
-setInterval(cleanupInactiveSessions, 30000);
+setInterval(() => {
+  cleanupInactiveSessions().catch((error) =>
+    logger.error({ event: "CLEANUP_FAILED", error: error.message }, "❌ Session cleanup failed")
+  );
+}, 30000);
 
 /** ---- Helper functions for description step ---- */
 
@@ -835,7 +839,7 @@ async function finalizeDescriptionStep(session: Session, triggerMessageId: strin
   }, `✅ DESCRIPTION_STEP_COMPLETE: Phone: ${session.user} | Workflow: ${session.workflowId} | Duration: ${duration}ms | Extractions: ${extractionResult?.extractions?.length || 0}`);
   
   // Clean up session
-  sessions.delete(session.user);
+  await sessions.delete(session.user);
   
   logger.debug({
     event: 'SESSION_CLEANUP',
@@ -870,17 +874,17 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
         // Status events
         for (const st of value.statuses ?? []) {
           const sid = st.id ?? `${st.recipient_id}:${st.status}:${st.timestamp}`;
-          if (seen.has(sid)) continue;
+          if (await idempotencyCache.has(sid)) continue;
           logger.debug(`📊 Status update: ${st.status}`);
-          seen.set(sid, true);
+          await idempotencyCache.set(sid);
           await forwardWithRetry({ kind: "status", metadata: value.metadata, status: st } as AnyObject);
         }
 
         // Messages
         for (const raw of value.messages ?? []) {
           const mid = (raw as any).id as string;
-          if (!mid || seen.has(mid)) continue;
-          seen.set(mid, true);
+          if (!mid || await idempotencyCache.has(mid)) continue;
+          await idempotencyCache.set(mid);
 
           const msg = normalizeMessage(raw);
           const rawFrom = msg.from;
@@ -939,7 +943,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           
           // --- RESTRUCTURED MESSAGE HANDLING ---
 
-          let session = sessions.get(from);
+          let session = await sessions.get(from);
           let replyTo = session?.rawUser || rawFrom;
 
           // 1) Handle location first (starts or updates workflows)
@@ -947,14 +951,14 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
             const locationPayload = (msg as any).location || {};
 
             if (!session) {
-              session = sessions.new(from, rawFrom);
+              session = await sessions.new(from, rawFrom);
               replyTo = session.rawUser;
             } else if (!session.rawUser) {
               session.rawUser = rawFrom;
             }
 
             session.location = locationPayload;
-            sessions.set(from, session, replyTo);
+            await sessions.set(from, session, replyTo);
 
             if (session.step === "awaiting_location" || session.step === "idle") {
               const nextState: Step = session.media.length > 0 ? 'awaiting_description' : 'awaiting_media';
@@ -971,7 +975,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 timestamp: new Date().toISOString()
               }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
 
-              transitionState(session, nextState, 'location_received', mid);
+              await transitionState(session, nextState, 'location_received', mid);
               if (nextState === 'awaiting_media') {
                 await sendText(replyTo, "📸 Konum alındı. Lütfen görsel veya video gönderin.");
               } else {
@@ -1003,11 +1007,11 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           }
 
           // Reload session (location handler may have created it)
-          session = sessions.get(from);
+          session = await sessions.get(from);
           replyTo = session?.rawUser || rawFrom;
 
           // 2) If no active session yet, instruct to share location
-          const allSessionKeys = sessions.keys();
+          const allSessionKeys = await sessions.keys();
           if (!session) {
             logger.warn({
               event: 'NO_ACTIVE_SESSION',
@@ -1039,7 +1043,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
 
             if (session.step === "awaiting_media") {
               session.media.push({ type: msg.type as "image" | "video", id: mediaId, caption: mediaCaption });
-              sessions.set(from, session, replyTo);
+              await sessions.set(from, session, replyTo);
 
               logger.info({
                 event: 'MEDIA_RECEIVED',
@@ -1050,7 +1054,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 timestamp: new Date().toISOString()
               }, `📸 MEDIA_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid} | Media: ${msg.type}`);
 
-              transitionState(session, 'awaiting_description', `${msg.type}_received`, mid);
+              await transitionState(session, 'awaiting_description', `${msg.type}_received`, mid);
               await sendText(replyTo, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
               continue;
             }
@@ -1114,7 +1118,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               
               // Create new workflow WITH the triggering media
               const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
-              const newSession = sessions.new(from, s.rawUser || rawFrom);
+              const newSession = await sessions.new(from, s.rawUser || rawFrom);
               newSession.workflowId = newWorkflowId;
 
               // Add the image/video that triggered this decision!
@@ -1125,14 +1129,14 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               await sendText(s.rawUser || rawFrom, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni akış için lütfen konumunuzu paylaşın.");
 
               // Transition to awaiting_location and request location (not another image!)
-              transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
+              await transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
               await requestLocation(newSession.rawUser || s.rawUser || rawFrom);
               continue;
 
             } else if (buttonId === "continue") {
               // Remove pending media and continue with current workflow
               delete (s as any).pendingMedia;
-              sessions.set(from, s, replyTo);
+              await sessions.set(from, s, replyTo);
 
               logger.info({
                 event: 'WORKFLOW_CONTINUE',
@@ -1197,7 +1201,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                   timestamp: Date.now()
                 });
                 s.hasDescriptions = true;
-                sessions.set(from, s, replyTo);
+              await sessions.set(from, s, replyTo);
 
                 await sendInteractiveButtons(replyTo, 
                   "✅ Açıklamanız bittiyse Tamam'a basın.\n📝 Bitmediyse ses kaydı veya yazılı açıklama göndermeye devam edin.",
