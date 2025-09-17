@@ -451,6 +451,7 @@ app.get("/whatsapp/webhook", (req, res) => {
 
 /** ---- Idempotency ---- */
 
+/*
 // 2-minute timeout cleanup
 async function cleanupInactiveSessions() {
   const now = Date.now();
@@ -493,6 +494,7 @@ setInterval(() => {
     logger.error({ event: "CLEANUP_FAILED", error: error.message }, "❌ Session cleanup failed")
   );
 }, 30000);
+*/
 
 /** ---- Helper functions for description step ---- */
 
