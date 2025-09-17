@@ -48,28 +48,34 @@ function initRedisClient(): IORedis | null {
       port,
       username,
       password,
-      tls: useTLS ? { rejectUnauthorized: false } : undefined,
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+      tls: useTLS ? {
+        rejectUnauthorized: false,
+        checkServerIdentity: () => undefined // Skip hostname verification
+      } : undefined,
+      connectTimeout: 10000, // 10 seconds
+      lazyConnect: false, // Connect immediately
+      maxRetriesPerRequest: 3,
+      enableAutoPipelining: false,
+      family: 4, // Force IPv4
     });
 
     redisClient.on("error", (error) => {
-      logger.error({ event: "REDIS_ERROR", error: error.message }, "❌ Redis connection error");
+      redisAvailable = false;
+      logger.error({ event: "REDIS_ERROR", error: error.message }, "❌ Redis connection error - CRITICAL: No fallback enabled");
     });
 
     redisClient.on("ready", () => {
-      logger.info("✅ Redis connection established");
+      logger.info("✅ Redis connection established successfully");
       redisAvailable = true;
     });
 
     redisClient.on("end", () => {
       redisAvailable = false;
-      logger.warn("⚠️ Redis connection closed; falling back to in-memory store");
+      logger.error("💥 Redis connection closed - CRITICAL: No fallback enabled");
     });
 
-    // Trigger lazy connection
-    redisClient.connect().catch((err) => {
-      logger.error({ event: "REDIS_CONNECT_FAILED", error: err.message }, "❌ Redis connection failed; using in-memory store");
+    redisClient.on("connect", () => {
+      logger.info("🔗 Redis connecting...");
     });
 
     return redisClient;
@@ -83,12 +89,12 @@ function initRedisClient(): IORedis | null {
 
 const client = initRedisClient();
 
-export const sessionAdapter: SessionStoreAdapter = client
-  ? new RedisSessionStore(client)
-  : new InMemorySessionStore(IN_MEMORY_LIMIT, SESSION_TTL_SECONDS * 1000);
+// Redis-only adapters - NO in-memory fallback
+if (!client) {
+  throw new Error("❌ Redis connection required - in-memory fallback disabled");
+}
 
-export const cacheAdapter: CacheStore = client
-  ? new RedisCacheStore(client)
-  : new InMemoryCacheStore();
+export const sessionAdapter: SessionStoreAdapter = new RedisSessionStore(client);
+export const cacheAdapter: CacheStore = new RedisCacheStore(client);
 
 export { SESSION_TTL_SECONDS, IDEMPOTENCY_TTL_SECONDS };
