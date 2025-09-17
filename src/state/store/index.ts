@@ -16,22 +16,33 @@ let redisClient: Redis | null = null;
 let redisAvailable = false;
 
 function initUpstashRedisClient(): Redis | null {
-  const { KV_REST_API_URL, KV_REST_API_TOKEN } = process.env;
+  // Try both Vercel KV variable names
+  const url = process.env.KV_REST_API_URL || process.env.KV_URL;
+  const token = process.env.KV_REST_API_TOKEN;
 
-  if (!KV_REST_API_URL || !KV_REST_API_TOKEN) {
-    logger.error("❌ Upstash REST API credentials not found - KV_REST_API_URL and KV_REST_API_TOKEN required");
+  logger.debug({
+    hasKV_REST_API_URL: !!process.env.KV_REST_API_URL,
+    hasKV_URL: !!process.env.KV_URL,
+    hasKV_REST_API_TOKEN: !!process.env.KV_REST_API_TOKEN,
+    hasREDIS_URL: !!process.env.REDIS_URL,
+    allEnvKeys: Object.keys(process.env).filter(k => k.includes('KV') || k.includes('REDIS'))
+  }, "🔍 Environment variables debug");
+
+  if (!url || !token) {
+    logger.error("❌ Upstash REST API credentials not found - KV_REST_API_URL/KV_URL and KV_REST_API_TOKEN required");
     throw new Error("Upstash REST API credentials required - in-memory fallback disabled");
   }
 
   try {
     redisClient = new Redis({
-      url: KV_REST_API_URL,
-      token: KV_REST_API_TOKEN,
+      url,
+      token,
     });
 
     logger.info({
-      url: KV_REST_API_URL.replace(/\/\/.*@/, '//***@'), // Mask credentials
-      hasToken: !!KV_REST_API_TOKEN
+      url: url.replace(/\/\/.*@/, '//***@'), // Mask credentials
+      hasToken: !!token,
+      tokenLength: token.length
     }, "✅ Upstash REST Redis client initialized");
 
     redisAvailable = true;
