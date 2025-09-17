@@ -1,11 +1,14 @@
 {
   "version": 2,
-  "functions": {
-    "dist/server.js": {
-      "runtime": "nodejs20.x",
-      "maxDuration": 60
+  "builds": [
+    {
+      "src": "dist/server.js",
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 60
+      }
     }
-  },
+  ],
   "routes": [
     {
       "src": "/(.*)",
