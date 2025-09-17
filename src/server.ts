@@ -642,7 +642,7 @@ async function extractWorkItemsFromText(session: Session, concatenatedDescriptio
 }
 
 // Send extraction results to user via WhatsApp
-async function sendExtractionResultsToUser(session: Session, concatenatedDescription: string, extractionResult: any): Promise<void> {
+async function sendExtractionResultsToUser(session: Session, concatenatedDescription: string, extractionResult: any): Promise<boolean> {
   try {
     const recipient = session.rawUser || session.user;
 
@@ -650,16 +650,17 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
     const extractions = Array.isArray(extractionResult.extractions) ? extractionResult.extractions : [];
 
     if (extractions.length === 0) {
-      await sendText(recipient, "⚠️ Mesajınızdan anlamlı bilgi çıkaramadık. Lütfen daha açıklayıcı bir şekilde bildirimde bulunun.");
+      await sendText(recipient, "⚠️ Mesajınızdan anlamlı bilgi çıkaramadık. Lütfen daha açıklayıcı bir şekilde bildirimde bulunun veya farklı bir açıklama deneyin.");
 
       logger.info({
         event: 'NO_EXTRACTIONS_NOTICE_SENT',
         phone: session.user,
         workflowId: session.workflowId,
         timestamp: new Date().toISOString()
-      }, `⚠️ NO_EXTRACTIONS_NOTICE_SENT: Phone: ${session.user} | Workflow: ${session.workflowId}`);
+      }, `⚠️ NO_EXTRACTIONS_NOTICE_SENT: Phone: ${session.user} | Workflow: ${session.workflowId} - Workflow continues`);
 
-      return;
+      // Return false to indicate workflow should NOT be completed
+      return false;
     }
 
     // Message 1: Concatenated description
@@ -743,6 +744,9 @@ async function sendExtractionResultsToUser(session: Session, concatenatedDescrip
     // Fallback message
     await sendText(session.rawUser || session.user, "✅ Teşekkürler, açıklamanız alındı ve işlendi.");
   }
+
+  // Return true to indicate workflow should be completed
+  return true;
 }
 
 // Forward workflow data to external system
@@ -803,8 +807,20 @@ async function finalizeDescriptionStep(session: Session, triggerMessageId: strin
   const extractionResult = await extractWorkItemsFromText(session, concatenatedDescription);
   
   // Step 3: Send results to user
-  await sendExtractionResultsToUser(session, concatenatedDescription, extractionResult);
-  
+  const shouldCompleteWorkflow = await sendExtractionResultsToUser(session, concatenatedDescription, extractionResult);
+
+  // If extraction failed, don't complete the workflow - let user try again
+  if (!shouldCompleteWorkflow) {
+    logger.info({
+      event: 'WORKFLOW_CONTINUATION_DUE_TO_EXTRACTION_FAILURE',
+      phone: session.user,
+      workflowId: session.workflowId,
+      messageId: triggerMessageId,
+      timestamp: new Date().toISOString()
+    }, `🔄 WORKFLOW_CONTINUATION: Phone: ${session.user} | Workflow: ${session.workflowId} - Extraction failed, workflow continues`);
+    return; // Don't complete workflow, stay in awaiting_description
+  }
+
   // Step 4: Forward data to external system
   await forwardWorkflowData(session, concatenatedDescription, extractionResult, duration);
   
