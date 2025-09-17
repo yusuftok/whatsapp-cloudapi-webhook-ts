@@ -220,7 +220,7 @@ async function requestLocation(to: string) {
   }
   return await sendText(
     to,
-    "Lütfen WhatsApp'ta ataç menüsünden (📎) *Konum* seçip mevcut konumunuzu paylaşın."
+    "Bildiriminizi başlatmak için lütfen WhatsApp'ta ataç menüsünden (📎) *Konum* seçip mevcut konumunuzu paylaşınız."
   );
 }
 
@@ -266,50 +266,36 @@ async function transitionState(
   return session;
 }
 
-// Helper function to handle mid-flow image decision
-async function handleMidFlowImage(
-  from: string, 
-  session: Session, 
+
+// Helper function to handle mid-flow location decision
+async function handleMidFlowLocation(
+  from: string,
+  session: Session,
   messageId: string,
-  mediaData: { type: "image" | "video"; id: string; caption?: string }
+  locationData: { latitude?: number; longitude?: number; name?: string; address?: string }
 ) {
   const replyTo = session.rawUser || from;
-  // Store media data temporarily for button handler
-  (session as any).pendingMedia = mediaData;
+  // Store location data temporarily for button handler
+  (session as any).pendingLocation = locationData;
   await sessions.set(from, session, replyTo);
-  
-  if (session.hasDescriptions) {
-    logger.info({
-      event: 'MID_FLOW_MEDIA_DECISION',
-      phone: from,
-      workflowId: session.workflowId,
-      messageId,
-      currentState: session.step,
-      descriptionsCount: session.descriptions.length,
-      mediaType: mediaData.type,
-      mediaId: mediaData.id,
-      timestamp: new Date().toISOString()
-    }, `❓ MID_FLOW_MEDIA_DECISION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Descriptions: ${session.descriptions.length} | Media: ${mediaData.type}`);
-    
-    return sendInteractiveButtons(replyTo, 
-      "Mevcut akışı kaydedip yeni akış başlatmak ister misiniz?",
-      [
-        {id: "save_new", title: "Evet"}, 
-        {id: "continue", title: "Hayır"}
-      ]
-    );
-  } else {
-    logger.info({
-      event: 'MID_FLOW_NO_DESCRIPTIONS',
-      phone: from,
-      workflowId: session.workflowId,
-      messageId,
-      mediaType: mediaData.type,
-      timestamp: new Date().toISOString()
-    }, `❓ MID_FLOW_NO_DESCRIPTIONS: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${messageId} | Media: ${mediaData.type}`);
-    
-    return sendText(replyTo, "Henüz açıklama yapmadınız. Lütfen sesli veya yazılı açıklama gönderin.");
-  }
+
+  logger.info({
+    event: 'MID_FLOW_LOCATION_DECISION',
+    phone: from,
+    workflowId: session.workflowId,
+    messageId,
+    currentState: session.step,
+    timestamp: new Date().toISOString()
+  }, `📍 MID_FLOW_LOCATION_DECISION: Phone: ${from} | Current workflow: ${session.workflowId} | State: ${session.step}`);
+
+  return sendInteractiveButtons(
+    replyTo,
+    "Mevcut bildirimden vazgeçip yeni bildirim başlatmak ister misiniz?",
+    [
+      {id: "new_location", title: "Evet"},
+      {id: "cancel_location", title: "Hayır"}
+    ]
+  );
 }
 
 /** ---- Signature verification ---- */
@@ -959,50 +945,36 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               session.rawUser = rawFrom;
             }
 
+            // Check if this is a mid-flow location (user is in active workflow)
+            if (session.step === "awaiting_media" || session.step === "awaiting_description") {
+              // Ask user if they want to start new workflow or continue current one
+              await handleMidFlowLocation(from, session, mid, locationPayload);
+              continue;
+            }
+
+            // Start new workflow (idle or awaiting_location states)
             session.location = locationPayload;
             await sessions.set(from, session, replyTo);
 
-            if (session.step === "awaiting_location" || session.step === "idle") {
-              const nextState: Step = session.media.length > 0 ? 'awaiting_description' : 'awaiting_media';
-              logger.info({
-                event: 'LOCATION_RECEIVED',
-                phone: from,
-                workflowId: session.workflowId,
-                messageId: mid,
-                location: {
-                  lat: locationPayload?.latitude,
-                  lng: locationPayload?.longitude,
-                  name: locationPayload?.name
-                },
-                timestamp: new Date().toISOString()
-              }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
+            const nextState: Step = session.media.length > 0 ? 'awaiting_description' : 'awaiting_media';
+            logger.info({
+              event: 'LOCATION_RECEIVED',
+              phone: from,
+              workflowId: session.workflowId,
+              messageId: mid,
+              location: {
+                lat: locationPayload?.latitude,
+                lng: locationPayload?.longitude,
+                name: locationPayload?.name
+              },
+              timestamp: new Date().toISOString()
+            }, `📍 LOCATION_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
 
-              await transitionState(session, nextState, 'location_received', mid);
-              if (nextState === 'awaiting_media') {
-                await sendText(replyTo, "📸 Konum alındı. Lütfen görsel veya video gönderin.");
-              } else {
-                await sendText(replyTo, "🎤 Konum alındı. Lütfen sesli veya yazılı açıklama yapın.");
-              }
-            } else if (session.step === "awaiting_media") {
-              logger.info({
-                event: 'LOCATION_UPDATED_BEFORE_MEDIA',
-                phone: from,
-                workflowId: session.workflowId,
-                messageId: mid,
-                timestamp: new Date().toISOString()
-              }, `📍 LOCATION_UPDATED_BEFORE_MEDIA: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
-
-              await sendText(replyTo, "📍 Konum güncellendi. Şimdi lütfen görsel veya video gönderin.");
-            } else if (session.step === "awaiting_description") {
-              logger.info({
-                event: 'LOCATION_UPDATED_DURING_DESCRIPTION',
-                phone: from,
-                workflowId: session.workflowId,
-                messageId: mid,
-                timestamp: new Date().toISOString()
-              }, `📍 LOCATION_UPDATED_DURING_DESCRIPTION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid}`);
-
-              await sendText(replyTo, "📍 Konum güncellendi. Açıklamalarınıza devam edin veya hazırsanız Tamam'a basın.");
+            await transitionState(session, nextState, 'location_received', mid);
+            if (nextState === 'awaiting_media') {
+              await sendText(replyTo, "📸 Konumunuz başarıyla alındı. Lütfen olayla ilgili görsel veya video paylaşınız.");
+            } else {
+              await sendText(replyTo, "📍 Konumunuz başarıyla alındı. Lütfen durumla ilgili sesli veya yazılı açıklamanızı paylaşınız.");
             }
 
             continue;
@@ -1057,7 +1029,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               }, `📸 MEDIA_RECEIVED: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid} | Media: ${msg.type}`);
 
               await transitionState(session, 'awaiting_description', `${msg.type}_received`, mid);
-              await sendText(replyTo, "🎤 Lütfen sesli veya yazılı açıklama yapın.");
+              await sendText(replyTo, "🎤 Teşekkür ederiz. Şimdi lütfen durumla ilgili sesli veya yazılı açıklamanızı paylaşınız.");
               continue;
             }
 
@@ -1069,16 +1041,16 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               };
 
               logger.info({
-                event: 'MID_FLOW_IMAGE_DETECTED',
+                event: 'MEDIA_DURING_DESCRIPTION',
                 phone: from,
                 workflowId: session.workflowId,
                 messageId: mid,
                 mediaType: msg.type,
                 currentState: session.step,
                 timestamp: new Date().toISOString()
-              }, `📸 MID_FLOW_IMAGE_DETECTED: Phone: ${from} | Workflow: ${session.workflowId} | State: ${session.step} | Media: ${msg.type}`);
+              }, `📸 MEDIA_DURING_DESCRIPTION: Phone: ${from} | Workflow: ${session.workflowId} | State: ${session.step} | Media: ${msg.type} - Reminder sent`);
 
-              await handleMidFlowImage(from, session, mid, mediaData);
+              await sendText(replyTo, "Şu anda açıklamanızı bekliyoruz. Lütfen sesli veya yazılı olarak devam ediniz.");
               continue;
             }
 
@@ -1091,7 +1063,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
               timestamp: new Date().toISOString()
             }, `⚠️ MEDIA_BEFORE_LOCATION: Phone: ${from} | Workflow: ${session.workflowId} | Message: ${mid} | State: ${session.step}`);
 
-            await sendText(replyTo, "📍 Önce konumunuzu paylaşın.");
+            await sendText(replyTo, "Yeni bir bildirim için öncelikle konumunuzu paylaşmanız gerekmektedir.");
             continue;
           }
 
@@ -1101,54 +1073,50 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
           if (s.step === "awaiting_description" && msg.type === "interactive" && (msg as any).interactive?.button_reply) {
             const buttonId = (msg as any).interactive.button_reply.id;
             
-            if (buttonId === "save_new") {
-              // Get the pending media that triggered this decision
-              const mediaData = (s as any).pendingMedia;
-              
+            if (buttonId === "new_location") {
+              // Get the pending location that triggered this decision
+              const locationData = (s as any).pendingLocation;
+
               logger.info({
-                event: 'WORKFLOW_SAVE_AND_NEW',
+                event: 'WORKFLOW_NEW_WITH_LOCATION',
                 phone: from,
                 workflowId: s.workflowId,
                 messageId: mid,
-                mediaType: mediaData?.type,
-                mediaId: mediaData?.id,
+                location: locationData,
                 timestamp: new Date().toISOString()
-              }, `💾 WORKFLOW_SAVE_AND_NEW: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} | Media: ${mediaData?.type}`);
-              
+              }, `📍 WORKFLOW_NEW_WITH_LOCATION: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid}`);
+
               // Finalize current workflow first
               await finalizeDescriptionStep(s, mid);
-              
-              // Create new workflow WITH the triggering media
+
+              // Create new workflow WITH the new location
               const newWorkflowId = `wf_${Date.now()}_${from.slice(-4)}`;
               const newSession = await sessions.new(from, s.rawUser || rawFrom);
               newSession.workflowId = newWorkflowId;
+              newSession.location = locationData;
 
-              // Add the image/video that triggered this decision!
-              if (mediaData) {
-                newSession.media.push(mediaData);
-              }
+              await sendText(s.rawUser || rawFrom, "✅ Mevcut bildiriminiz kaydedildi. Yeni bildirim için lütfen görsel veya video gönderin.");
 
-              await sendText(s.rawUser || rawFrom, "✅ Mevcut açıklamanız kaydedildi. Şimdi yeni akış için lütfen konumunuzu paylaşın.");
-
-              // Transition to awaiting_location and request location (not another image!)
-              await transitionState(newSession, 'awaiting_location', 'save_new_with_media', mid);
-              await requestLocation(newSession.rawUser || s.rawUser || rawFrom);
+              // Start new workflow at awaiting_media stage
+              await transitionState(newSession, 'awaiting_media', 'new_location_workflow', mid);
               continue;
 
-            } else if (buttonId === "continue") {
-              // Remove pending media and continue with current workflow
-              delete (s as any).pendingMedia;
+            } else if (buttonId === "cancel_location") {
+              // Remove pending location and continue with current workflow
+              delete (s as any).pendingLocation;
               await sessions.set(from, s, replyTo);
 
               logger.info({
-                event: 'WORKFLOW_CONTINUE',
+                event: 'LOCATION_CANCELLED_CONTINUE_WORKFLOW',
                 phone: from,
                 workflowId: s.workflowId,
                 messageId: mid,
+                currentState: s.step,
                 timestamp: new Date().toISOString()
-              }, `▶️ WORKFLOW_CONTINUE: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} - Image ignored`);
+              }, `📍 LOCATION_CANCELLED: Phone: ${from} | Workflow: ${s.workflowId} | Message: ${mid} - Location ignored, continuing workflow`);
 
-              await sendText(replyTo, "📝 Mevcut konuyu açıklamaya devam edin.");
+              // Send appropriate reminder (we're already in awaiting_description state)
+              await sendText(replyTo, "Lütfen açıklamanıza devam ediniz. Tamamladığınızda 'Tamam' butonuna basabilirsiniz.");
               continue;
             }
           }
@@ -1179,7 +1147,7 @@ app.post("/whatsapp/webhook", async (req: Request & { rawBody?: Buffer }, res: R
                 timestamp: new Date().toISOString()
               }, `📸 AWAITING_MEDIA_PROMPT: Phone: ${from} | Message: ${mid} | Type: ${msg.type}`);
 
-              await sendText(replyTo, "📸 Konumdan sonra lütfen görsel veya video gönderin.");
+              await sendText(replyTo, "Lütfen olayla ilgili görsel veya video paylaşınız.");
               break;
 
             case 'awaiting_description':
