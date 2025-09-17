@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 🤖 Codex Agent Notes
+- When running health checks or other curl requests against production, always use the stable Vercel alias `https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app` instead of per-deployment URLs.
+- Prefer scripts or documented commands over ad-hoc requests so future sessions follow the same pattern.
+
 ## 🚀 Development Commands
 
 ### Core Development Workflow

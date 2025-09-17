@@ -1,0 +1,28 @@
+{
+  "whitelisted_commands": [
+    "git status",
+    "git diff",
+    "git add",
+    "git commit",
+    "git push",
+    "curl https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/healthz",
+    "curl -s https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/healthz",
+    "curl -I https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/healthz",
+    "curl -s -D - https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/healthz",
+    "curl https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/readyz",
+    "curl -s https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/readyz",
+    "curl -I https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/readyz",
+    "curl -s -D - https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/readyz",
+    "curl https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/test-openai",
+    "curl -s https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/test-openai",
+    "curl -s -D - https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app/test-openai",
+    "vercel list --environment production --yes",
+    "vercel list --environment production --yes --next 0",
+    "vercel inspect whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app",
+    "vercel inspect whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app --logs",
+    "vercel inspect https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app",
+    "vercel inspect https://whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app --logs",
+    "vercel logs whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app",
+    "vercel logs whatsapp-cloudapi-webhook-ts-yusuftoks-projects.vercel.app --json"
+  ]
+}
