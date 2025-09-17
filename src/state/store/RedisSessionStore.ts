@@ -15,24 +15,23 @@ export class RedisSessionStore implements SessionStoreAdapter {
     return `${SESSION_PREFIX}${id}`;
   }
 
-  async get(key: string): Promise<SessionRecord | null> {
-    const raw = await this.client.get(this.key(key)) as string | null;
+  /**
+   * Helper function to handle different response formats between IORedis and Upstash REST
+   */
+  private parseRedisValue(raw: any): any {
     if (!raw) return null;
 
-    // Debug logging to understand the response format
-    console.log(`[DEBUG] Redis get response for key ${this.key(key)}:`, {
-      type: typeof raw,
-      value: raw,
-      isString: typeof raw === 'string',
-      stringified: JSON.stringify(raw)
-    });
-
-    // Handle different response formats between IORedis and Upstash REST
+    // Handle different response formats
     let jsonString: string;
     if (typeof raw === 'string') {
       jsonString = raw;
     } else if (raw && typeof raw === 'object') {
-      // If it's already an object, stringify then parse to ensure consistency
+      // If it's already an object, return it directly (Upstash REST sometimes returns parsed objects)
+      // But if it looks like a stringified object, parse it
+      if (raw.toString && raw.toString() === '[object Object]') {
+        throw new Error(`Invalid Redis response: [object Object]`);
+      }
+      // Try to stringify then parse to ensure consistency
       jsonString = JSON.stringify(raw);
     } else {
       throw new Error(`Unexpected Redis response type: ${typeof raw}, value: ${raw}`);
@@ -43,6 +42,11 @@ export class RedisSessionStore implements SessionStoreAdapter {
     } catch (error) {
       throw new Error(`Failed to parse Redis value as JSON: ${jsonString}, original type: ${typeof raw}`);
     }
+  }
+
+  async get(key: string): Promise<SessionRecord | null> {
+    const raw = await this.client.get(this.key(key)) as string | null;
+    return this.parseRedisValue(raw);
   }
 
   async set(key: string, record: SessionRecord, ttlSeconds: number): Promise<void> {
@@ -76,7 +80,10 @@ export class RedisSessionStore implements SessionStoreAdapter {
       const value = values[i];
       if (!value) continue;
       const sessionKey = key.replace(SESSION_PREFIX, "");
-      result.push([sessionKey, JSON.parse(value)]);
+      const parsedValue = this.parseRedisValue(value);
+      if (parsedValue) {
+        result.push([sessionKey, parsedValue]);
+      }
     }
     return result;
   }
