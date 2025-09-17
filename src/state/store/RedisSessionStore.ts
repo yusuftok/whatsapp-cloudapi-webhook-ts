@@ -21,15 +21,36 @@ export class RedisSessionStore implements SessionStoreAdapter {
   private parseRedisValue(raw: any): any {
     if (!raw) return null;
 
+    // Enhanced debug logging
+    console.log(`[DEBUG] parseRedisValue input:`, {
+      type: typeof raw,
+      value: raw,
+      isString: typeof raw === 'string',
+      isObject: typeof raw === 'object',
+      toString: raw?.toString ? raw.toString() : 'no toString',
+      constructor: raw?.constructor?.name,
+      keys: typeof raw === 'object' ? Object.keys(raw) : 'not object',
+      stringified: JSON.stringify(raw),
+      length: raw?.length
+    });
+
     // Handle different response formats
     let jsonString: string;
     if (typeof raw === 'string') {
       jsonString = raw;
     } else if (raw && typeof raw === 'object') {
-      // If it's already an object, return it directly (Upstash REST sometimes returns parsed objects)
-      // But if it looks like a stringified object, parse it
+      // Check if it's already a valid parsed object
       if (raw.toString && raw.toString() === '[object Object]') {
-        throw new Error(`Invalid Redis response: [object Object]`);
+        // This is an actual object, not a string - maybe it's already the parsed data
+        console.log(`[DEBUG] Object detected, checking if it's valid data:`, raw);
+
+        // If it has expected session properties, return it directly
+        if (raw.state || raw.phone || raw.createdAt) {
+          console.log(`[DEBUG] Returning object as-is (appears to be valid session data)`);
+          return raw;
+        }
+
+        throw new Error(`Invalid Redis response: [object Object] with keys: ${Object.keys(raw)}`);
       }
       // Try to stringify then parse to ensure consistency
       jsonString = JSON.stringify(raw);
@@ -40,7 +61,7 @@ export class RedisSessionStore implements SessionStoreAdapter {
     try {
       return JSON.parse(jsonString);
     } catch (error) {
-      throw new Error(`Failed to parse Redis value as JSON: ${jsonString}, original type: ${typeof raw}`);
+      throw new Error(`Failed to parse Redis value as JSON: ${jsonString}, original type: ${typeof raw}, error: ${error}`);
     }
   }
 
