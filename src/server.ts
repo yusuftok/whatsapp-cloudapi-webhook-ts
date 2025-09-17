@@ -1278,4 +1278,10 @@ app.post("/send/text", async (req: Request, res: Response) => {
   }
 });
 
-app.listen(Number(PORT), () => logger.info(`Webhook listening on :${PORT}`));
+// For local development only
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(Number(PORT), () => logger.info(`Local dev server listening on :${PORT}`));
+}
+
+// Export for Vercel serverless
+export default app;
