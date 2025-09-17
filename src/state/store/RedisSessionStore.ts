@@ -1,12 +1,13 @@
 import IORedis from "ioredis";
+import { Redis } from "@upstash/redis";
 import { SessionRecord, SessionStoreAdapter } from "./SessionStore";
 
 const SESSION_PREFIX = process.env.REDIS_SESSION_PREFIX || "sessions:";
 
 export class RedisSessionStore implements SessionStoreAdapter {
-  private client: IORedis;
+  private client: IORedis | Redis;
 
-  constructor(client: IORedis) {
+  constructor(client: IORedis | Redis) {
     this.client = client;
   }
 
@@ -15,28 +16,36 @@ export class RedisSessionStore implements SessionStoreAdapter {
   }
 
   async get(key: string): Promise<SessionRecord | null> {
-    const raw = await this.client.get(this.key(key));
+    const raw = await this.client.get(this.key(key)) as string | null;
     if (!raw) return null;
     return JSON.parse(raw);
   }
 
   async set(key: string, record: SessionRecord, ttlSeconds: number): Promise<void> {
     const payload = JSON.stringify(record);
+    const redisKey = this.key(key);
+
     if (ttlSeconds > 0) {
-      await this.client.set(this.key(key), payload, "EX", ttlSeconds);
+      // Upstash REST client format
+      if ('setex' in this.client) {
+        await this.client.setex(redisKey, ttlSeconds, payload);
+      } else {
+        // IORedis format
+        await (this.client as any).set(redisKey, payload, "EX", ttlSeconds);
+      }
     } else {
-      await this.client.set(this.key(key), payload);
+      await (this.client as any).set(redisKey, payload);
     }
   }
 
   async delete(key: string): Promise<boolean> {
-    return (await this.client.del(this.key(key))) > 0;
+    return (await this.client.del(this.key(key)) as number) > 0;
   }
 
   async entries(): Promise<Array<[string, SessionRecord]>> {
-    const keys = await this.client.keys(`${SESSION_PREFIX}*`);
+    const keys = await this.client.keys(`${SESSION_PREFIX}*`) as string[];
     if (keys.length === 0) return [];
-    const values = await this.client.mget(keys);
+    const values = await this.client.mget(keys) as (string | null)[];
     const result: Array<[string, SessionRecord]> = [];
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i]!;
@@ -49,7 +58,7 @@ export class RedisSessionStore implements SessionStoreAdapter {
   }
 
   async size(): Promise<number> {
-    const keys = await this.client.keys(`${SESSION_PREFIX}*`);
+    const keys = await this.client.keys(`${SESSION_PREFIX}*`) as string[];
     return keys.length;
   }
 }
