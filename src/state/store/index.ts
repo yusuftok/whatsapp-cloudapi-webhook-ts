@@ -24,9 +24,25 @@ function initRedisClient(): IORedis | null {
   }
 
   try {
-    redisClient = new IORedis(REDIS_URL, {
+    // Handle Upstash URL formats for ioredis compatibility
+    let connectionUrl = REDIS_URL;
+
+    // If URL contains 'default:' username, remove it for ioredis
+    if (connectionUrl.includes('://default:')) {
+      connectionUrl = connectionUrl.replace('://default:', '://:');
+      logger.debug("Adjusted Redis URL format for ioredis compatibility");
+    }
+
+    // Ensure TLS is used for Upstash (rediss://)
+    if (connectionUrl.startsWith('redis://')) {
+      connectionUrl = connectionUrl.replace('redis://', 'rediss://');
+      logger.debug("Enabled TLS for Redis connection");
+    }
+
+    redisClient = new IORedis(connectionUrl, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
+      tls: {}, // Enable TLS for Upstash
     });
 
     redisClient.on("error", (error) => {
