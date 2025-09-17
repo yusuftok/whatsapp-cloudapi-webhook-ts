@@ -18,7 +18,31 @@ export class RedisSessionStore implements SessionStoreAdapter {
   async get(key: string): Promise<SessionRecord | null> {
     const raw = await this.client.get(this.key(key)) as string | null;
     if (!raw) return null;
-    return JSON.parse(raw);
+
+    // Debug logging to understand the response format
+    console.log(`[DEBUG] Redis get response for key ${this.key(key)}:`, {
+      type: typeof raw,
+      value: raw,
+      isString: typeof raw === 'string',
+      stringified: JSON.stringify(raw)
+    });
+
+    // Handle different response formats between IORedis and Upstash REST
+    let jsonString: string;
+    if (typeof raw === 'string') {
+      jsonString = raw;
+    } else if (raw && typeof raw === 'object') {
+      // If it's already an object, stringify then parse to ensure consistency
+      jsonString = JSON.stringify(raw);
+    } else {
+      throw new Error(`Unexpected Redis response type: ${typeof raw}, value: ${raw}`);
+    }
+
+    try {
+      return JSON.parse(jsonString);
+    } catch (error) {
+      throw new Error(`Failed to parse Redis value as JSON: ${jsonString}, original type: ${typeof raw}`);
+    }
   }
 
   async set(key: string, record: SessionRecord, ttlSeconds: number): Promise<void> {
